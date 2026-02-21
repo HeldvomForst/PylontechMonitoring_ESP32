@@ -22,8 +22,8 @@ struct BatteryConfig {
     unsigned long intervalBat  = 300000;
     unsigned long intervalStat = 1800000;
 
-    bool enableBat  = true;
-    bool enableStat = true;
+    bool enableBat  = false;
+    bool enableStat = false;
 
     bool useFahrenheit = false;
 

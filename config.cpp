@@ -60,8 +60,8 @@ void AppConfig::factoryDefaults() {
     battery.intervalBat  = 300000;
     battery.intervalStat = 1800000;
 
-    battery.enableBat  = false;
-    battery.enableStat = false;
+    battery.enableBat  = true;
+    battery.enableStat = true;
     battery.useFahrenheit = false;
 
     // MQTT defaults

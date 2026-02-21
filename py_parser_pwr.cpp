@@ -275,6 +275,7 @@ ParseResult parsePwrFrame(const String& raw,
     // Signal to MQTT that valid data is available
     parserHasData = true;
     newParserData = true;
-
+    py_scheduler.lastCommandFinished = millis();
+    
     return PARSE_OK;
 }

@@ -3,9 +3,14 @@ All notable changes to this project will be documented in this file.
 
 ## ToDo
 
-- more Data (bat x; stat x)
+- multitasking 
+- more stable communication to battery 
 - other Homeautomation
 - Display? 
+
+## 2026-02-21
+- include command and Parser for bat x (Celldata) 
+- include command and parser for stat x (Statistic data) 
 
 ## 2026-01-31
 - change code from [@hidaba](https://github.com/hidaba) (D1 mini) to ESP32-S

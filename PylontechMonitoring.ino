@@ -51,7 +51,7 @@ void setup() {
     py_uart.begin(16, 17);
     py_scheduler.begin(&py_uart);
 
-    py_scheduler.enqueue(CMD_PWR);
+    py_scheduler.enqueue("pwr");
     Log(LOG_INFO, "Scheduler: initial CMD_PWR enqueued");
 
     // System Manager
@@ -84,16 +84,36 @@ void setup() {
     // Webserver Command Callback
     WebServerModule_setCommandCallback([](const String &cmd){
         if (cmd == "pwr") {
-            py_scheduler.enqueue(CMD_PWR);
+            py_scheduler.enqueue("pwr");
             Log(LOG_INFO, "Web command: pwr");
             return String("OK");
         }
         return String("UNKNOWN");
     });
+    // =========================
+    //  UART auf Core 0 auslagern
+    // =========================
+    xTaskCreatePinnedToCore(
+        uartTask,          // Task-Funktion
+        "UART Task",       // Name
+        4096,              // Stackgröße
+        NULL,              // Parameter
+        1,                 // Priorität
+        NULL,              // Task-Handle (optional)
+        0                  // Core 0
+    );
 
     Log(LOG_INFO, "Setup complete");
 }
-
+// =========================
+//  UART Task (Core 0)
+// =========================
+void uartTask(void* parameter) {
+    for (;;) {
+        py_uart.loop();   // bleibt leer, aber hält UART-Interrupts aktiv
+        vTaskDelay(1);    // 1 Tick Pause, verhindert 100% CPU-Last
+    }
+}
 
 // =========================
 //  Loop
@@ -108,4 +128,16 @@ void loop() {
     py_mqtt.loop();
 
     WebServerModule_handle();
+
+    static unsigned long last = 0;
+    if (millis() - last > 2000) {
+        last = millis();
+
+        String msg = "Heap free=" + String(ESP.getFreeHeap()) +
+                    " min=" + String(ESP.getMinFreeHeap()) +
+                    " maxAlloc=" + String(ESP.getMaxAllocHeap());
+
+        Log(LOG_INFO, msg);
+    }
+
 }

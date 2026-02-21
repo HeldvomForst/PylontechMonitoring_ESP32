@@ -1,5 +1,9 @@
 #include "py_uart.h"
 #include "py_log.h"
+#include "py_parser_pwr.h"
+#include "py_parser_bat.h"
+#include "py_parser_stat.h"
+
 
 #define BAT_RX_PIN 16
 #define BAT_TX_PIN 17
@@ -155,6 +159,7 @@ bool PyUart::sendCommandAndReadSerialResponse(const char* cmd) {
 
     if (cmd && cmd[0]) Serial2.write(cmd);
     Serial2.write("\n");
+    Serial2.flush();
 
     if (readFromSerial() > 0) return true;
 
@@ -172,35 +177,61 @@ bool PyUart::sendCommandAndReadSerialResponse(const char* cmd) {
 // Adds frame validation flag
 // ---------------------------------------------------------
 bool PyUart::sendCommand(const char* cmd) {
-    if (!commReady) return false;
+    if (!commReady)
+        return false;
 
-    lastCommand = String(cmd); 
-    
+    // --- FIX A: RX-Buffer leeren ---
+    while (Serial2.available()) Serial2.read();
+    delay(10);
+
+    // Speichere den zuletzt gesendeten Befehl
+    lastCommand = String(cmd);
+
     busy = true;
     frameReady = false;
     frameValid = false;
 
+    // Befehl senden + Antwort empfangen
     if (!sendCommandAndReadSerialResponse(cmd)) {
         busy = false;
         return false;
     }
 
+    // Empfangenen Frame in String umwandeln
     String raw = String(g_szRecvBuff);
 
-    // Validate frame (but do NOT discard it)
+    // Frame validieren (Parser entscheidet später selbst)
     frameValid = isValidFrame(raw);
 
     if (!frameValid) {
         Log(LOG_WARN, "UART: invalid frame received (parser will skip it)");
     }
 
+    // Frame speichern
     lastRawFrame = raw;
     frameReady = true;
     busy = false;
 
+    // ---------------------------------------------------------
+    // Parser-Aufrufe: UART sagt nur "hier ist ein Frame"
+    // Jeder Parser entscheidet selbst, ob er zuständig ist.
+    // ---------------------------------------------------------
+
+    // PWR Parser
+    BatteryStack tmpStack;
+    std::vector<BatteryModule> tmpModules;
+    parsePwrFrame(raw, tmpStack, tmpModules);
+
+    // BAT Parser
+    BatData bat;
+    parseBatFrame(0, raw, bat);
+
+    // STAT Parser
+    StatData stat;
+    parseStatFrame(0, raw, stat);
+
     return true;
 }
-
 // ---------------------------------------------------------
 // loop() does nothing because UART logic is blocking
 // ---------------------------------------------------------

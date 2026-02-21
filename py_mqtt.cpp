@@ -5,6 +5,34 @@
 #include <WiFi.h>
 #include <map>
 
+#include <set>
+
+extern bool parserHasData;
+extern bool newParserData;
+
+extern bool statParserHasData;
+extern int  statParserModuleIndex;
+
+extern bool batParserHasData;
+extern int  batParserModuleIndex;
+
+std::set<int> discoveredPwr;
+std::set<int> discoveredBat;
+std::set<int> discoveredStat;
+void PyMqtt::resetDiscovery() {
+    discoveredPwr.clear();
+    discoveredBat.clear();
+    discoveredStat.clear();
+
+    discoverySent = false;
+
+    parserHasData     = true;
+    newParserData     = true;
+    batParserHasData  = true;
+    statParserHasData = true;
+
+    Log(LOG_INFO, "MQTT: Discovery reset triggered");
+}
 std::map<String, String> lastMqttValues;
 
 static unsigned long lastReconnectAttempt = 0;
@@ -14,6 +42,12 @@ static unsigned long wifiConnectedSince   = 0;
 bool discoverySent = false;
 bool parserHasData = false;
 bool newParserData = false;
+bool statParserHasData = false;
+int  statParserModuleIndex = 0;
+bool batParserHasData = false;
+int  batParserModuleIndex = 0;
+
+
 
 PyMqtt py_mqtt;
 
@@ -24,6 +58,8 @@ extern std::vector<BatteryModule> lastParsedModules;
 // ----------------------------------------------------
 // Helper: make MQTT-safe ID / key
 // ----------------------------------------------------
+
+
 static String make_safe_id(const String& s) {
     String r = s;
     r.toLowerCase();
@@ -237,7 +273,78 @@ void PyMqtt::publishDiscoveryBat() {
         }
     }
 }
+void PyMqtt::publishDiscoveryBatCells(int moduleIndex) {
+    String prefix   = config.mqtt.prefix;
+    String subtopic = config.mqtt.topicBat;
 
+    DynamicJsonDocument doc(512);
+
+    // EIN Gerät pro Modul für ALLE Zellen
+    String devId   = prefix + "_bat_" + String(moduleIndex);
+    String devName = prefix + " BAT " + String(moduleIndex);
+
+    for (const auto& cell : lastParsedBatCells) {
+
+        // State Topic pro Zelle
+        String stateTopic = prefix + "/" + subtopic + "/" +
+                            String(moduleIndex) + "/cell" + String(cell.cellIndex);
+
+        for (auto &f : cell.fields) {
+
+            if (!config.battery.fields.count(f.name)) continue;
+            const FieldConfig &fc = config.battery.fields[f.name];
+            if (!fc.send) continue;
+
+            // EIN Device → aber eindeutige Sensor-ID
+            String uid = devId + "_cell" + String(cell.cellIndex) + "_" + make_safe_id(f.name);
+
+            String sensorName = "BAT " + String(moduleIndex) +
+                                " Cell " + String(cell.cellIndex) +
+                                " " + fc.label;
+
+            buildDiscovery(doc, fc, f.name, stateTopic, uid, sensorName, devId, devName);
+
+            String out;
+            serializeJson(doc, out);
+            String topic = "homeassistant/sensor/" + uid + "/config";
+            mqttClient.publish(topic.c_str(), out.c_str(), true);
+            mqttClient.loop();
+            delay(50);
+        }
+    }
+}
+void PyMqtt::publishDiscoveryStat(int moduleIndex) {
+    String prefix   = config.mqtt.prefix;
+    String subtopic = config.mqtt.topicStat;
+
+    String devId      = prefix + "_stat_" + String(moduleIndex);
+    String devName    = prefix + " STAT " + String(moduleIndex);
+    String stateTopic = prefix + "/" + subtopic + "/" + String(moduleIndex);
+
+    DynamicJsonDocument doc(512);
+
+    for (auto &f : lastParsedStat.fields) {
+
+        String name = f.name;
+
+        if (!config.battery.fields.count(name)) continue;
+        const FieldConfig &fc = config.battery.fields[name];
+
+        if (!fc.send) continue;
+
+        String uid        = devId + "_" + make_safe_id(name);
+        String sensorName = "STAT " + String(moduleIndex) + " " + fc.label;
+
+        buildDiscovery(doc, fc, name, stateTopic, uid, sensorName, devId, devName);
+
+        String out;
+        serializeJson(doc, out);
+        String topic = "homeassistant/sensor/" + uid + "/config";
+        mqttClient.publish(topic.c_str(), out.c_str(), true);
+        mqttClient.loop();
+        delay(50);
+    }
+}
 // ----------------------------------------------------
 // Begin
 // ----------------------------------------------------
@@ -290,22 +397,81 @@ void PyMqtt::loop() {
         return;
     }
 
-    if (parserHasData && !discoverySent) {
-        Log(LOG_INFO, "MQTT: Sending discovery after first parser run");
-        publishDiscoveryStack();
-        publishDiscoveryBat();
-        discoverySent = true;
+    // Discovery nur einmal
+    // PWR Discovery + Publisher
+    if (newParserData) {
+
+        publishStack();
+
+        for (const auto& mod : lastParsedModules) {
+            if (!mod.present) continue;
+
+            int idx = mod.index;
+
+            // PWR Discovery (unverändert)
+            if (!discoveredPwr.count(idx)) {
+                publishDiscoveryBat();   // dein alter PWR-Discoverer
+                discoveredPwr.insert(idx);
+            }
+
+            // PWR Publisher
+            publishBat(idx, mod);
+        }
+
+        newParserData = false;
     }
 
+    // BAT Discovery + Publisher
+    if (batParserHasData) {
+
+        int idx = batParserModuleIndex;
+
+        if (!discoveredBat.count(idx)) {
+            publishDiscoveryBatCells(idx);
+            discoveredBat.insert(idx);
+        }
+
+        publishBatCells(idx);
+        batParserHasData = false;
+    }
+
+    // STAT Discovery + Publisher
+    if (statParserHasData) {
+
+        int idx = statParserModuleIndex;
+
+        if (!discoveredStat.count(idx)) {
+            publishDiscoveryStat(idx);
+            discoveredStat.insert(idx);
+        }
+
+        publishStat(idx);
+        statParserHasData = false;
+    }
+
+    // PWR → Modul-Daten
     if (newParserData) {
         publishStack();
 
         for (const auto& mod : lastParsedModules) {
             if (!mod.present) continue;
-            publishBat(mod.index, mod);
+            publishBat(mod.index, mod);   // ← PWR Publisher
         }
 
         newParserData = false;
+    }
+
+    // BAT → Zell-Daten
+    if (batParserHasData) {
+        publishBatCells(batParserModuleIndex);
+        batParserHasData = false;
+    }
+
+
+    // STAT → Status-Daten
+    if (statParserHasData) {
+        publishStat(statParserModuleIndex);      // ← STAT Publisher
+        statParserHasData = false;
     }
 
     mqttClient.loop();
@@ -353,6 +519,7 @@ void PyMqtt::publishStack() {
     if (!mqttClient.publish(topic.c_str(), payload.c_str()))
         logPublishFailure(topic);
 }
+
 // ----------------------------------------------------
 // Module publish (one JSON per battery, dynamic fields)
 // ----------------------------------------------------
@@ -393,6 +560,93 @@ void PyMqtt::publishBat(int index, const BatteryModule& mod) {
     serializeJson(doc, payload);
 
     Log(LOG_DEBUG, "MQTT: Module " + String(index) + " JSON length = " + String(payload.length()));
+
+    if (!mqttClient.publish(topic.c_str(), payload.c_str()))
+        logPublishFailure(topic);
+}
+
+void PyMqtt::publishBatCells(int moduleIndex) {
+    if (!enabled || !mqttClient.connected()) return;
+    if (lastParsedBatCells.empty()) return;
+
+    String prefix   = config.mqtt.prefix;
+    String subtopic = config.mqtt.topicBat;
+
+    // Jede Zelle einzeln senden
+    for (const auto& cell : lastParsedBatCells) {
+
+        // Topic: prefix/bat/<moduleIndex>/cell<cellIndex>
+        String topic = prefix + "/" + subtopic + "/" +
+                       String(moduleIndex) + "/cell" + String(cell.cellIndex);
+
+        DynamicJsonDocument doc(1024);
+
+        for (auto &f : cell.fields) {
+
+            if (!config.battery.fields.count(f.name)) continue;
+            const FieldConfig &fc = config.battery.fields[f.name];
+            if (!fc.mqtt) continue;
+
+            String safe  = make_safe_id(f.name);
+            String value = computeValue(f.raw, fc);
+
+            if (fc.factor == "text" || fc.factor == "date")
+                doc[safe] = value;
+            else
+                doc[safe] = value.toFloat();
+        }
+
+        String payload;
+        serializeJson(doc, payload);
+
+        Log(LOG_INFO,
+            "MQTT BAT: sending module " + String(moduleIndex) +
+            " cell " + String(cell.cellIndex) +
+            " to topic " + topic +
+            " (len=" + String(payload.length()) + ")");
+
+        mqttClient.publish(topic.c_str(), payload.c_str());
+    }
+}
+
+void PyMqtt::publishStat(int moduleIndex) {
+    if (!enabled || !mqttClient.connected()) return;
+    if (!config.battery.enableStat) return;
+    if (lastParsedStat.fields.empty()) return;
+
+    String prefix   = config.mqtt.prefix;
+    String subtopic = config.mqtt.topicStat;
+
+    // Topic: prefix/stat/<moduleIndex>
+    String topic = prefix + "/" + subtopic + "/" + String(moduleIndex);
+
+    DynamicJsonDocument doc(1024);
+
+    for (auto &f : lastParsedStat.fields) {
+
+        String name = f.name;
+        String raw  = f.raw;
+
+        if (!config.battery.fields.count(name)) continue;
+        FieldConfig &fc = config.battery.fields[name];
+
+        if (!fc.mqtt) continue;
+
+        String value = computeValue(raw, fc);
+        String safe  = make_safe_id(name);
+
+        if (fc.factor == "text" || fc.factor == "date") {
+            doc[safe] = value;
+        } else {
+            doc[safe] = value.toFloat();
+        }
+    }
+
+    String payload;
+    serializeJson(doc, payload);
+
+    Log(LOG_INFO, "MQTT STAT: sending module " + String(moduleIndex) +
+                  " to topic " + topic + " (len=" + String(payload.length()) + ")");
 
     if (!mqttClient.publish(topic.c_str(), payload.c_str()))
         logPublishFailure(topic);

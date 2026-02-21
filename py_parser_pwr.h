@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #include <vector>
 #include <map>
+#include "py_scheduler.h"
+extern PyScheduler py_scheduler;
+
 
 enum ParseResult {
     PARSE_OK,

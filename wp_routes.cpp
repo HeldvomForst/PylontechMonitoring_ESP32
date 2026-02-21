@@ -7,12 +7,16 @@
 #include "web/wp_log.h"
 #include "web/wp_connect.h"
 #include "web/wp_pwr_setting.h"
+#include "web/wp_bat_setting.h"
+#include "web/wp_stat_setting.h"
 
 // API / Modules
 #include "py_wifimanager.h"
 #include "config.h"
 #include "py_uart.h"
-#include "py_parser_pwr.h"   // <-- needed for lastParsedStack, lastParserHeader, lastParserValues
+#include "py_parser_pwr.h" 
+#include "py_parser_bat.h"
+#include "py_parser_stat.h"  
 #include "py_scheduler.h"
 #include "py_mqtt.h"
 #include "py_log.h"
@@ -68,7 +72,7 @@ static void handleApiLogLevelSet() {
 // ---------------------------------------------------------
 static void handleReq() {
     String cmd = server.arg("code");
-    py_scheduler.enqueueRaw(cmd);
+    py_scheduler.enqueue(cmd);
     server.send(200, "text/plain", "OK");
 }
 
@@ -448,11 +452,211 @@ static void handleApiPwrSet() {
     }
 
     // Discovery neu senden
-    discoverySent = false;
+    py_mqtt.resetDiscovery();
 
     config.save();
     server.send(200, "text/plain", "PWR settings saved");
 }
+
+// ---------------------------------------------------------
+//  API: BAT settings
+// ---------------------------------------------------------
+
+static void handleApiBatGet() {
+    DynamicJsonDocument doc(8192);
+
+    // Basis-Konfiguration
+    doc["enable_bat"] = config.battery.enableBat;
+    doc["interval_bat"] = config.battery.intervalBat / 1000;
+    doc["mqtt_bat"]     = config.mqtt.topicBat;
+    doc["cell_index"]   = lastParsedBat.cellIndex;
+
+    JsonArray fields = doc.createNestedArray("fields");
+
+    // Wenn Parser-Daten vorhanden sind
+    if (lastParsedBat.fields.size() > 0) {
+
+        for (auto &f : lastParsedBat.fields) {
+
+            String name = f.name;
+            String raw  = f.raw;
+
+            // Config laden oder Default erzeugen
+            FieldConfig fc;
+            if (config.battery.fields.count(name)) {
+                fc = config.battery.fields[name];
+            } else {
+                fc.label  = name;
+                fc.factor = "1";
+                fc.unit   = "";
+                fc.mqtt   = false;
+                fc.send   = false;
+            }
+
+            JsonObject o = fields.createNestedObject();
+            o["name"]        = name;        // Original-Feldname
+            o["display"]     = fc.label;    // Anzeigename
+            o["factor"]      = fc.factor;
+            o["unit"]        = fc.unit;
+            o["sendMQTT"]    = fc.mqtt;
+            o["sendPayload"] = fc.send;
+            o["raw"]         = raw;
+            o["value"]       = raw;         // Noch keine Berechnung
+        }
+    }
+
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+}
+
+static void handleApiBatSet() {
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "Missing body");
+        return;
+    }
+
+    DynamicJsonDocument req(8192);
+    if (deserializeJson(req, server.arg("plain"))) {
+        server.send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+
+    // Basiswerte speichern
+    config.battery.enableBat = req["enable_bat"] | false;
+    config.battery.intervalBat = (req["interval_bat"] | 300) * 1000UL;
+    config.mqtt.topicBat       = req["mqtt_bat"] | "bat";
+
+    // Felder speichern
+    JsonArray arr = req["fields"];
+    for (JsonObject f : arr) {
+
+        String name = f["name"] | "";
+        if (name.length() == 0) continue;
+
+        // Falls neu → Default anlegen
+        if (!config.battery.fields.count(name)) {
+            FieldConfig fc;
+            fc.label  = name;
+            fc.factor = "1";
+            fc.unit   = "";
+            fc.mqtt   = false;
+            fc.send   = false;
+            config.battery.fields[name] = fc;
+        }
+
+        FieldConfig &fc = config.battery.fields[name];
+
+        fc.label = f["display"] | fc.label;
+        fc.factor = f["factor"] | fc.factor;
+        fc.unit = f["unit"] | fc.unit;
+        fc.mqtt = f["sendMQTT"] | false;
+        fc.send = f["sendPayload"] | false;
+    }
+    py_mqtt.resetDiscovery();
+    config.save();
+    server.send(200, "text/plain", "BAT settings saved");
+}
+
+// ---------------------------------------------------------
+//  API: STAT settings
+// ---------------------------------------------------------
+
+static void handleApiStatGet() {
+    DynamicJsonDocument doc(8192);
+
+    // Basis-Konfiguration
+    doc["enable_stat"]  = config.battery.enableStat;
+    doc["interval_stat"] = config.battery.intervalStat / 1000;
+    doc["mqtt_stat"]     = config.mqtt.topicStat;
+
+    JsonArray fields = doc.createNestedArray("fields");
+
+    // Parserdaten vorhanden?
+    if (lastParsedStat.fields.size() > 0) {
+
+        for (auto &f : lastParsedStat.fields) {
+
+            String name = f.name;
+            String raw  = f.raw;
+
+            // Config laden oder Default erzeugen
+            FieldConfig fc;
+            if (config.battery.fields.count(name)) {
+                fc = config.battery.fields[name];
+            } else {
+                fc.label  = name;
+                fc.factor = "1";
+                fc.unit   = "";
+                fc.mqtt   = false;
+                fc.send   = false;
+            }
+
+            JsonObject o = fields.createNestedObject();
+            o["name"]        = name;        // Original Feldname
+            o["display"]     = fc.label;    // Anzeigename
+            o["factor"]      = fc.factor;
+            o["unit"]        = fc.unit;
+            o["sendMQTT"]    = fc.mqtt;
+            o["sendPayload"] = fc.send;
+            o["raw"]         = raw;
+            o["value"]       = raw;         // Noch keine Berechnung
+        }
+    }
+
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+}
+
+static void handleApiStatSet() {
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "Missing body");
+        return;
+    }
+
+    DynamicJsonDocument req(8192);
+    if (deserializeJson(req, server.arg("plain"))) {
+        server.send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+
+    // Basiswerte speichern
+    config.battery.enableStat = req["enable_stat"] | false;
+    config.battery.intervalStat = (req["interval_stat"] | 1800) * 1000UL;
+    config.mqtt.topicStat       = req["mqtt_stat"] | "stat";
+
+    // Felder speichern
+    JsonArray arr = req["fields"];
+    for (JsonObject f : arr) {
+
+        String name = f["name"] | "";
+        if (name.length() == 0) continue;
+
+        // Falls neu → Default anlegen
+        if (!config.battery.fields.count(name)) {
+            FieldConfig fc;
+            fc.label  = name;
+            fc.factor = "1";
+            fc.unit   = "";
+            fc.mqtt   = false;
+            fc.send   = false;
+            config.battery.fields[name] = fc;
+        }
+
+        FieldConfig &fc = config.battery.fields[name];
+
+        fc.label = f["display"] | fc.label;
+        fc.factor = f["factor"] | fc.factor;
+        fc.unit = f["unit"] | fc.unit;
+        fc.mqtt = f["sendMQTT"] | false;
+        fc.send = f["sendPayload"] | false;
+    }
+    py_mqtt.resetDiscovery();
+    config.save();
+    server.send(200, "text/plain", "STAT settings saved");
+}
+
 // ---------------------------------------------------------
 //  Route Registration
 // ---------------------------------------------------------
@@ -503,5 +707,15 @@ void registerRoutes() {
     // NEW: PWR settings + parser fields
     server.on("/api/pwr/get", HTTP_GET, handleApiPwrGet);
     server.on("/api/pwr/set", HTTP_POST, handleApiPwrSet);
+
+    server.on("/bat_setting", HTTP_GET, handleBatSettingsPage);
+    server.on("/stat_setting", HTTP_GET, handleStatSettingsPage);
+
+    server.on("/api/bat/get", HTTP_GET, handleApiBatGet);
+    server.on("/api/bat/set", HTTP_POST, handleApiBatSet);
+
+    server.on("/api/stat/get", HTTP_GET, handleApiStatGet);
+    server.on("/api/stat/set", HTTP_POST, handleApiStatSet);
+
 
 }
