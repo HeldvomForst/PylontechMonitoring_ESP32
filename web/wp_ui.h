@@ -44,11 +44,13 @@ inline String webSidebar(const String& active) {
         html += "'>" + label + "</a>";
     };
 
-    link("/",            "Startseite",      "home");
-    link("/pwr_setting", "Basiswerte",      "pwr_setting");
-    link("/battery",     "Battery Console", "battery");
-    link("/connect",     "Connection",      "connect");
-    link("/log",         "Runtime Log",     "log");
+    link("/",             "Startpage",       "home");
+    link("/pwr_setting",  "Basevalue",       "pwr_setting");
+	link("/bat_setting",  "Celldata",        "bat_setting");
+	link("/stat_setting", "Statistic",       "stat_setting");
+    link("/battery",      "Battery Console", "battery");
+    link("/connect",      "Connection",      "connect");
+    link("/log",          "Runtime Log",     "log");
 
     html += "</div>";
     return html;
