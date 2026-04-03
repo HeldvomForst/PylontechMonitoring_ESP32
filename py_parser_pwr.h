@@ -1,61 +1,22 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
-#include <map>
-#include "py_scheduler.h"
-extern PyScheduler py_scheduler;
+#include "config.h" 
 
+// ---------------------------------------------------------
+// PWR Parser Header
+// ---------------------------------------------------------
+// This header only declares the parser function and exposes
+// global UI helper variables. All data structures are defined
+// centrally in config.h to avoid duplication and include cycles.
+// ---------------------------------------------------------
 
-enum ParseResult {
-    PARSE_OK,
-    PARSE_FAIL,
-    PARSE_IGNORED
-};
-
-/**
- * Data model for a single module.
- * Now includes a dynamic field map for ALL parsed values.
- */
-struct BatteryModule {
-    int index = -1;
-    bool present = false;
-
-    // Classic fixed fields (kept for convenience)
-    int voltage_mV = 0;
-    int current_mA = 0;
-    int temperature = 0;
-    int soc = 0;
-
-    // NEW: dynamic mapping of ALL raw parser values
-    std::map<String, String> fields;
-};
-
-/**
- * Data model for the whole stack (unchanged)
- */
-struct BatteryStack {
-    int batteryCount = 0;
-
-    long avgVoltage_mV = 0;
-    long totalCurrent_mA = 0;
-
-    int soc = 0;
-    int temperature = 0;
-
-    void reset() {
-        batteryCount = 0;
-        avgVoltage_mV = 0;
-        totalCurrent_mA = 0;
-        soc = 0;
-        temperature = 0;
-    }
-};
-
+// Main PWR parser function
 ParseResult parsePwrFrame(const String& raw,
-                   BatteryStack& stackOut,
-                   std::vector<BatteryModule>& modulesOut);
+                          BatteryStack& stackOut,
+                          std::vector<BatteryModule>& modulesOut);
 
-// For web settings page
+// Global parser results for the Web UI (filled by parser)
 extern BatteryStack lastParsedStack;
 extern std::vector<BatteryModule> lastParsedModules;
 extern std::vector<String> lastParserHeader;

@@ -1,57 +1,47 @@
 #pragma once
+
 #include <Arduino.h>
-#include <map>
-#include <vector>
-#include <WiFi.h>
+#include <PubSubClient.h>
+#include <WiFiClient.h>
 #include <ArduinoJson.h>
 #include "config.h"
-#include "py_parser_pwr.h"
-#include "py_parser_bat.h"
-#include "py_parser_stat.h"
 
-#define MQTT_MAX_PACKET_SIZE 2048
-#include <PubSubClient.h>
+// Forward declarations
+struct BatteryModule;
+struct BatteryStack;
+struct BatField;
+struct BatData;
+struct StatField;
+struct StatData;
+struct ParsedData;
 
-// Last MQTT values for web UI
-extern std::map<String, String> lastMqttValues;
-extern BatData  lastParsedBat;
-extern StatData lastParsedStat;
-
-// Discovery / parser state flags
-extern bool discoverySent;
-extern bool parserHasData;
-extern bool newParserData;
-extern bool statParserHasData;
-extern int  statParserModuleIndex;
+struct MqttMessage {
+    char topic[128];
+    char payload[64];
+};
 
 class PyMqtt {
 public:
+    // Core lifecycle
     void begin();
     void loop();
-    void resetDiscovery();
+    void resetDiscovery(bool pwr, bool bat, bool stat);
 
-    // JSON publish
-    void publishStack();
+    // Raw publish (Task1 → Task2)
+    bool publishRaw(const String& topic, const String& payload);
+
+    // Publish parsed data
+    void publishStack(const BatteryStack& stack);
     void publishBat(int index, const BatteryModule& mod);
-    void publishBatCells(int cellIndex);   // BAT-Parser (Cell-Daten)
-    void publishStat(int moduleIndex);      // STAT-Parser
+    void publishDiscoveryBatModule(int moduleIndex);
+    void publishDiscoveryBatCell(int moduleIndex, int cellIndex);
+    void publishBatCells(int moduleIndex, const std::vector<BatData>& batCells);
+    void publishStat(int moduleIndex, const StatData& stat);
 
-    void logPublishFailure(const String& topic);
-    void buildDiscovery(JsonDocument& doc,
-                        const FieldConfig& fc,
-                        const String& name,
-                        const String& stateTopic,
-                        const String& uid,
-                        const String& sensorName,
-                        const String& deviceId,
-                        const String& deviceName);
-    
-    void publishDiscoveryBatCells(int moduleIndex);
-    void publishDiscoveryStat(int moduleIndex);
-
+    bool isDiscoveryActive() const { return discoveryActive; }
 
     bool isConnected() { return mqttClient.connected(); }
-
+    void publishDiscoveryStatModule(int moduleIndex);
 
 
 private:
@@ -59,14 +49,59 @@ private:
     PubSubClient mqttClient = PubSubClient(wifiClient);
 
     bool enabled = false;
+    bool discoveryActive = false;
 
+    int precisionForUnit(const String& unit);
+    bool precisionDiffersFromDefault(const String& unit);
+
+    // MQTT connection
     bool connect();
 
+    // Value conversion (numeric, text, date)
     String computeValue(const String& raw, const FieldConfig& fc);
 
-    // Discovery
-    void publishDiscoveryStack();
-    void publishDiscoveryBat();
-};
+    // Name normalization (CamelCase)
+    String normalizeName(const String& in);
 
-extern PyMqtt py_mqtt;
+    // Decimal precision based on unit
+    int decimalsForUnit(const String& unit);
+
+    // Device class based on unit
+    String deviceClassForUnit(const String& unit);
+
+    // Build MQTT topic
+    String buildTopic(
+        const String& subtopic,
+        int moduleIndex,
+        const String& fieldName,
+        int cellIndex,
+        bool isCell
+    );
+
+    // Build unique_id, object_id, friendly_name, discovery topic
+    void buildDiscoveryIds(
+        String& uniqueId,
+        String& objectId,
+        String& friendlyName,
+        String& discoveryTopic,
+        const String& subtopic,
+        int moduleIndex,
+        const String& displayName,
+        int cellIndex,
+        bool isCell
+    );
+
+    // Add HA metadata (unit, device_class, precision)
+    void addDiscoveryMeta(JsonDocument& doc, const FieldConfig& fc);
+
+    // Discovery publishers
+    void publishDiscoveryStack();
+    void publishDiscoveryPwrModule(int moduleIndex);
+    void publishDiscoveryStatField(int moduleIndex, const StatField& f);
+
+    // Discovery state machine
+    void handleDiscoveryStep(const ParsedData& localCopy);
+
+    // Logging helper
+    void logPublishFailure(const String& topic);
+};

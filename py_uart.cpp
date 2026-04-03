@@ -4,46 +4,47 @@
 #include "py_parser_bat.h"
 #include "py_parser_stat.h"
 
-
 #define BAT_RX_PIN 16
 #define BAT_TX_PIN 17
 
-// Global receive buffer (same as old .ino)
+// Global receive buffer
 static char g_szRecvBuff[7000];
 
+// Count invalid frames to detect lost communication
+static int g_invalidCount = 0;
+
 // ---------------------------------------------------------
-// Frame Validator
-// Checks whether a received frame looks complete and valid.
-// We do NOT reject frames here — we only mark them as valid/invalid.
-// The parser decides whether to process them.
+// Frame validator: Pylontech console frame
 // ---------------------------------------------------------
 static bool isValidFrame(const String& f) {
-    // 1) Must start with '@'
+    // Must contain '@' (start of data)
     if (f.indexOf("@") < 0) return false;
 
-    // 2) Must contain "$$" (end of data section)
-    if (f.indexOf("$$") < 0) return false;
+    // Must contain '$$' (end of data)
+    int posEnd = f.indexOf("$$");
+    if (posEnd < 0) return false;
 
-    // 3) Must end with "pylon"
-    if (f.indexOf("pylon") < 0) return false;
+    // Must contain 'pylon>' (console prompt)
+    if (f.indexOf("pylon>") < 0) return false;
 
-    // 4) Must contain at least 3 lines
+    // Must contain at least 3 lines
     int lines = 0;
     for (int i = 0; i < f.length(); i++)
         if (f[i] == '\n') lines++;
     if (lines < 3) return false;
 
-    // 5) Must not contain console prompts
-    if (f.indexOf("Press [Enter]") >= 0) return false;
+    // Must not be a pure wake-up prompt
+    if (f.indexOf("Press [Enter]") >= 0 && f.indexOf("Remote command:") < 0)
+        return false;
 
-    // 6) Minimum length check
-    if (f.length() < 50) return false;
+    // Minimum length check
+    if (f.length() < 40) return false;
 
     return true;
 }
 
 // ---------------------------------------------------------
-// Initialize UART communication
+// Initialize UART
 // ---------------------------------------------------------
 void PyUart::begin(int rx, int tx) {
     rxPin = rx;
@@ -54,16 +55,23 @@ void PyUart::begin(int rx, int tx) {
 
     Log(LOG_INFO, "UART: begin()");
 
-    commReady = false;
-    busy = false;
-    frameReady = false;
-    frameValid = false;
+    commReady     = false;
+    busy          = false;
+    frameReady    = false;
+    frameValid    = false;
+    lastCommand   = "";
+    lastRawFrame  = "";
+    lastPwrFrame  = "";
+    lastBatFrame  = "";
+    lastStatFrame = "";
+    g_invalidCount = 0;
 
+    // Initial wake-up once at startup
     wakeUpConsole();
 }
 
 // ---------------------------------------------------------
-// Switch UART baud rate (legacy logic from old .ino)
+// Switch baud rate (only used during wake-up)
 // ---------------------------------------------------------
 void PyUart::switchBaud(int newRate) {
     Serial2.flush();
@@ -75,21 +83,24 @@ void PyUart::switchBaud(int newRate) {
 }
 
 // ---------------------------------------------------------
-// Wake up the Pylontech console (legacy logic)
-// Sends magic sequence at 1200 baud, then switches back.
+// Wake up the Pylontech console
 // ---------------------------------------------------------
 void PyUart::wakeUpConsole() {
     Log(LOG_INFO, "UART: wakeUpConsole()");
 
+    commReady = false;
+
+    // Magic wake-up sequence at 1200 baud
     switchBaud(1200);
     Serial2.write("~20014682C0048520FCC3\r");
     delay(1000);
 
     byte nl[] = {0x0E, 0x0A};
 
+    // Back to normal console baud
     switchBaud(115200);
 
-    // Try sending newline until console responds
+    // Send newlines to trigger console prompt
     for (int i = 0; i < 10; i++) {
         Serial2.write(nl, 2);
         delay(1000);
@@ -101,14 +112,13 @@ void PyUart::wakeUpConsole() {
     }
 
     commReady = true;
+    g_invalidCount = 0;
     Log(LOG_INFO, "UART: wakeUpConsole complete → commReady=true");
 }
 
 // ---------------------------------------------------------
-// Read from UART until either:
-// - "pylon>" appears (end of frame)
-// - timeout occurs
-// - buffer is full
+// Read full frame (blocking, RAW, UNFILTERED)
+// Handles pagination: "Press [Enter] to be continued"
 // ---------------------------------------------------------
 int PyUart::readFromSerial() {
     memset(g_szRecvBuff, 0, sizeof(g_szRecvBuff));
@@ -152,101 +162,137 @@ int PyUart::readFromSerial() {
 }
 
 // ---------------------------------------------------------
-// Send command and read response (legacy logic)
+// Send command + read response
 // ---------------------------------------------------------
 bool PyUart::sendCommandAndReadSerialResponse(const char* cmd) {
-    switchBaud(115200);
+    // Log TX
+    if (cmd && cmd[0]) {
+        Log(LOG_DEBUG, "UART TX: '" + String(cmd) + "'");
+        Serial2.write(cmd);
+    }
 
-    if (cmd && cmd[0]) Serial2.write(cmd);
     Serial2.write("\n");
+    Log(LOG_DEBUG, "UART TX: '\\n'");
     Serial2.flush();
 
-    if (readFromSerial() > 0) return true;
-
-    // Retry by waking console
-    wakeUpConsole();
-
-    if (cmd && cmd[0]) Serial2.write(cmd);
-    Serial2.write("\n");
-
-    return readFromSerial() > 0;
+    int len = readFromSerial();
+    return (len > 0);
 }
 
 // ---------------------------------------------------------
-// Public API: send command and capture frame
-// Adds frame validation flag
+// Public API: send command and parse frame
 // ---------------------------------------------------------
 bool PyUart::sendCommand(const char* cmd) {
-    if (!commReady)
-        return false;
 
-    // --- FIX A: RX-Buffer leeren ---
+    // If communication was lost → try wake-up once
+    if (!commReady) {
+        Log(LOG_WARN, "UART: commReady=false → wakeUpConsole()");
+        wakeUpConsole();
+        if (!commReady) {
+            Log(LOG_ERROR, "UART: wakeUpConsole failed");
+            return false;
+        }
+    }
+
+    // Clear RX buffer
     while (Serial2.available()) Serial2.read();
     delay(10);
 
-    // Speichere den zuletzt gesendeten Befehl
     lastCommand = String(cmd);
 
-    busy = true;
+    busy       = true;
     frameReady = false;
     frameValid = false;
 
-    // Befehl senden + Antwort empfangen
+    // Send + receive
     if (!sendCommandAndReadSerialResponse(cmd)) {
         busy = false;
+        g_invalidCount++;
+        Log(LOG_WARN, "UART: no response, invalidCount=" + String(g_invalidCount));
+
+        if (g_invalidCount > 3) {
+            commReady = false;
+            Log(LOG_ERROR, "UART: too many failures → commReady=false");
+        }
+
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
         return false;
     }
 
-    // Empfangenen Frame in String umwandeln
+    // Raw data from buffer
     String raw = String(g_szRecvBuff);
 
-    // Frame validieren (Parser entscheidet später selbst)
+    // Always store raw frame
+    lastRawFrame = raw;
+    frameReady   = true;
+
+    // Validate frame
     frameValid = isValidFrame(raw);
 
     if (!frameValid) {
-        Log(LOG_WARN, "UART: invalid frame received (parser will skip it)");
+        Log(LOG_WARN, "UART: invalid frame received");
+
+        g_invalidCount++;
+        if (g_invalidCount > 3) {
+            commReady = false;
+            Log(LOG_ERROR, "UART: too many invalid frames → commReady=false");
+        }
+
+        busy = false;
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        return false;
     }
 
-    // Frame speichern
-    lastRawFrame = raw;
-    frameReady = true;
+    // Valid frame
+    g_invalidCount = 0;
+
+    // Store last valid frame for web UI
+    if (lastCommand == "pwr") {
+        lastPwrFrame = raw;
+    } else if (lastCommand.startsWith("bat")) {
+        lastBatFrame = raw;
+    } else if (lastCommand.startsWith("stat")) {
+        lastStatFrame = raw;
+    }
+
+    // Parser routing
+    if (lastCommand == "pwr") {
+        BatteryStack tmpStack;
+        std::vector<BatteryModule> tmpModules;
+        parsePwrFrame(raw, tmpStack, tmpModules);
+    }
+    else if (lastCommand.startsWith("bat")) {
+        int idx = lastCommand.substring(4).toInt();
+        BatData bat;
+        parseBatFrame(idx, raw, bat);
+    }
+    else if (lastCommand.startsWith("stat")) {
+        int idx = lastCommand.substring(5).toInt();
+        StatData stat;
+        parseStatFrame(idx, raw, stat);
+    }
+
     busy = false;
 
-    // ---------------------------------------------------------
-    // Parser-Aufrufe: UART sagt nur "hier ist ein Frame"
-    // Jeder Parser entscheidet selbst, ob er zuständig ist.
-    // ---------------------------------------------------------
-
-    // PWR Parser
-    BatteryStack tmpStack;
-    std::vector<BatteryModule> tmpModules;
-    parsePwrFrame(raw, tmpStack, tmpModules);
-
-    // BAT Parser
-    BatData bat;
-    parseBatFrame(0, raw, bat);
-
-    // STAT Parser
-    StatData stat;
-    parseStatFrame(0, raw, stat);
+    // Fixed delay after every frame (valid or invalid)
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     return true;
 }
-// ---------------------------------------------------------
-// loop() does nothing because UART logic is blocking
+
 // ---------------------------------------------------------
 void PyUart::loop() {
     // intentionally empty
 }
 
 // ---------------------------------------------------------
-// Retrieve last frame
-// ---------------------------------------------------------
 String PyUart::getFrame() {
     frameReady = false;
     return lastRawFrame;
 }
 
-bool PyUart::isReady() const { return commReady; }
-bool PyUart::isBusy() const { return busy; }
-bool PyUart::hasFrame() const { return frameReady; }
+String PyUart::getLastCommand() const { return lastCommand; }
+bool   PyUart::isFrameValid() const   { return frameValid; }
+bool   PyUart::hasFrame() const       { return frameReady; }
+bool   PyUart::isReady() const        { return commReady; }
+bool   PyUart::isBusy() const         { return busy; }

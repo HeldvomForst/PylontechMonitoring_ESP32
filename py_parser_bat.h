@@ -1,36 +1,21 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
-#include "py_parser_pwr.h"
-#include "py_scheduler.h"
-
-extern PyScheduler py_scheduler;
+#include "config.h"   // Provides BatField, BatData, ParseResult
 
 // ---------------------------------------------------------
-// BAT field + BAT cell structure
+// BAT Parser Header
 // ---------------------------------------------------------
-struct BatField {
-    String name;
-    String raw;
-};
+// All BAT-related data structures (BatField, BatData) are
+// defined centrally in config.h. This header only declares
+// the parser function and exposes global UI helper variables.
+// ---------------------------------------------------------
 
-struct BatData {
-    int cellIndex = -1;                 // 0–14
-    std::vector<BatField> fields;       // alle Spalten der BAT-Zeile
-};
-
-// ---------------------------------------------------------
-// GLOBAL BAT CELL STORAGE
-// Wird vom Parser gefüllt, vom MQTT-Publisher gelesen
-// ---------------------------------------------------------
+// Global BAT cell storage (filled by parser, used by UI/MQTT)
 extern std::vector<BatData> lastParsedBatCells;
+extern BatData lastParsedBat;
 
-// Optional: falls du es noch brauchst
-extern BatData lastParsedBatModules[16];
-
-// ---------------------------------------------------------
-// Parser-Signatur
-// ---------------------------------------------------------
+// BAT parser function
 ParseResult parseBatFrame(int moduleIndex,
                           const String& raw,
                           BatData& out);

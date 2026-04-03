@@ -1,10 +1,14 @@
 
 #include "py_log.h"
 #include <Arduino.h>
+#include <Preferences.h>
 #include "esp_log.h"
 #include "config.h"
 
 extern AppConfig config;
+
+bool persistentLoggingEnabled = false;
+static const int MAX_PLOG = 200;
 
 // ---------------------------------------------------------
 // Timestamp: YYYY.MM.DD hh:mm:ss,ms
@@ -95,4 +99,39 @@ void Log(LogLevel lvl, const String& msg) {
 
     // --- Serial ---
     Serial.println(line);
+    // Optional persistent log
+    PersistentLog(line);
+}
+
+static Preferences plogPrefs;
+
+void PersistentLog(const String& msg) {
+    if (!persistentLoggingEnabled) return;
+
+    plogPrefs.begin("plog", false);
+
+    int count = plogPrefs.getInt("count", 0);
+    String key = "e" + String(count % MAX_PLOG);
+
+    plogPrefs.putString(key.c_str(), msg);
+    plogPrefs.putInt("count", count + 1);
+
+    plogPrefs.end();
+}
+
+String PersistentLogDump() {
+    plogPrefs.begin("plog", true);
+
+    int count = plogPrefs.getInt("count", 0);
+    int start = max(0, count - MAX_PLOG);
+
+    String out = "";
+
+    for (int i = start; i < count; i++) {
+        String key = "e" + String(i % MAX_PLOG);
+        out += plogPrefs.getString(key.c_str(), "") + "\n";
+    }
+
+    plogPrefs.end();
+    return out;
 }

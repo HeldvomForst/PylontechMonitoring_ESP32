@@ -3,10 +3,13 @@ All notable changes to this project will be documented in this file.
 
 ## ToDo
 
-- multitasking 
-- more stable communication to battery 
-- other Homeautomation
+- more stable Website
+- other Homeautomation (Discoverer)
 - Display? 
+
+## 2026-04-03 
+- Stable communikation to battery
+- use 2 core 
 
 ## 2026-02-21
 - include command and Parser for bat x (Celldata) 

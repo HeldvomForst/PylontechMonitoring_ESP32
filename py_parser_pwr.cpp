@@ -2,23 +2,35 @@
 #include "py_log.h"
 #include "config.h"
 #include "py_uart.h"
+#include "py_mqtt.h"
 
 #include <cctype>
 #include <algorithm>
 
+// UART instance
 extern PyUart py_uart;
+
+// MQTT queue (from .ino)
+extern QueueHandle_t mqttQueue;
+extern bool parserHasData;
+extern bool newParserData;
+extern bool discoveryPwrNeeded;
+extern bool discoveryBatNeeded;
+extern bool discoveryStatNeeded;
 
 // Global parser data for web interface
 std::vector<String> lastParserHeader;
 std::vector<String> lastParserValues;
 
-// Discovery / parser state flag (defined in py_mqtt.cpp)
-extern bool parserHasData;
-extern bool newParserData;
-
-// Global parser results for API & UI
+// Global parser results
 BatteryStack lastParsedStack;
 std::vector<BatteryModule> lastParsedModules;
+
+// Double buffer extern
+extern ParsedData bufferA;
+extern ParsedData bufferB;
+extern volatile bool useA;
+
 
 // ---------------------------------------------------------
 // Helper: trim whitespace
@@ -70,13 +82,11 @@ ParseResult parsePwrFrame(const String& raw,
                           BatteryStack& stackOut,
                           std::vector<BatteryModule>& modulesOut)
 {
-    // Only parse if last command was "pwr"
     if (py_uart.getLastCommand() != "pwr") {
         Log(LOG_DEBUG, "PWR parser: ignoring frame (last command was '" + py_uart.getLastCommand() + "')");
         return PARSE_IGNORED;
     }
-    
-    // skip invalid frames
+
     if (!py_uart.isFrameValid()) {
         Log(LOG_WARN, "PWR parser: skipping invalid frame");
         return PARSE_FAIL;
@@ -87,14 +97,12 @@ ParseResult parsePwrFrame(const String& raw,
 
     Log(LOG_INFO, "PWR parser: raw frame received, length=" + String(raw.length()));
 
-    // 1) Extract @ ... $$ frame
     String frame;
     if (!extractFrame(raw, frame)) {
         Log(LOG_WARN, "PWR parser: no valid @ ... $$ frame found");
         return PARSE_FAIL;
     }
 
-    // 2) Split into lines
     std::vector<String> lines;
     {
         int pos = 0;
@@ -116,7 +124,6 @@ ParseResult parsePwrFrame(const String& raw,
         return PARSE_FAIL;
     }
 
-    // 3) Header line
     std::vector<String> header = splitWS(lines[0]);
     if (header.size() < 3) {
         Log(LOG_WARN, "PWR parser: header too small");
@@ -126,7 +133,6 @@ ParseResult parsePwrFrame(const String& raw,
     lastParserHeader = header;
     lastParserValues.clear();
 
-    // Index of Base/Base.St for "Absent" detection
     int baseIndex = -1;
     for (size_t h = 0; h < header.size(); h++) {
         if (header[h] == "Base.St" || header[h] == "Base") {
@@ -135,12 +141,10 @@ ParseResult parsePwrFrame(const String& raw,
         }
     }
 
-    // 4) Data lines
     for (size_t i = 1; i < lines.size(); i++) {
 
         std::vector<String> cols = splitWS(lines[i]);
 
-        // Fix "YYYY-MM-DD HH:MM:SS" time split
         int timeIndex = -1;
         for (size_t h = 0; h < header.size(); h++) {
             if (header[h] == "Time") {
@@ -164,13 +168,11 @@ ParseResult parsePwrFrame(const String& raw,
 
         if (cols.size() < header.size()) continue;
 
-        // Absent detection
         if (baseIndex >= 0 && cols[baseIndex] == "Absent") {
-            Log(LOG_INFO, "PWR parser: Absent detected at line " + String(i) + " → stop parsing");
+            Log(LOG_INFO, "PWR parser: Absent detected at line " + String(i));
             break;
         }
 
-        // Store first data row for web interface
         if (lastParserValues.empty()) {
             lastParserValues = cols;
         }
@@ -178,17 +180,12 @@ ParseResult parsePwrFrame(const String& raw,
         BatteryModule mod;
         mod.present = true;
 
-        // ---------------------------------------------------------
-        // NEW: dynamic mapping of ALL fields
-        // ---------------------------------------------------------
         for (size_t c = 0; c < header.size(); c++) {
             const String& col = header[c];
             const String& value = cols[c];
 
-            // Store raw value dynamically
             mod.fields[col] = value;
 
-            // Classic fixed fields (unchanged)
             if (col == "Power" || col == "Battery") {
                 mod.index = value.toInt();
             }
@@ -221,17 +218,8 @@ ParseResult parsePwrFrame(const String& raw,
         }
 
         modulesOut.push_back(mod);
-
-        Log(LOG_INFO,
-            "PWR parser: module " + String(mod.index) +
-            " V=" + String(mod.voltage_mV) +
-            " I=" + String(mod.current_mA) +
-            " T=" + String(mod.temperature) +
-            " SOC=" + String(mod.soc)
-        );
     }
 
-    // 5) Stack calculation
     if (modulesOut.empty()) {
         Log(LOG_WARN, "PWR parser: no modules parsed");
         return PARSE_FAIL;
@@ -239,6 +227,7 @@ ParseResult parsePwrFrame(const String& raw,
 
     int count = modulesOut.size();
     stackOut.batteryCount = count;
+    config.detectedModules = count;
 
     long sumVolt = 0;
     long sumCurr = 0;
@@ -258,24 +247,35 @@ ParseResult parsePwrFrame(const String& raw,
     stackOut.soc             = minSoc;
     stackOut.temperature     = maxTemp;
 
-    Log(LOG_INFO,
-        "PWR parser: stack Vavg=" + String(stackOut.avgVoltage_mV) +
-        " I=" + String(stackOut.totalCurrent_mA) +
-        " SOC=" + String(stackOut.soc) +
-        " T=" + String(stackOut.temperature)
-    );
-
-    // Set last battery update timestamp
     config.lastPwrUpdate = config.getCurrentTimeString();
 
-    // Store global parser results
+    // --- Double Buffer Write (POINTER VERSION) ---
+    //
+    // Select the target buffer *after* the frame has been fully validated
+    // and parsed. We do NOT toggle before writing, because that would
+    // expose MQTT to a half‑written buffer.
+    //
+    ParsedData* target = useA ? &bufferB : &bufferA;
+
+    // Write the complete PWR frame into the selected buffe
+    target->stack   = stackOut;
+    target->modules = modulesOut;
+
+    // Update global UI data (not part of the double buffer)
     lastParsedStack = stackOut;
     lastParsedModules = modulesOut;
 
-    // Signal to MQTT that valid data is available
+    // -------------------------------------------------------------
+    // Toggle the active buffer ONLY AFTER the frame is fully written.
+    // This guarantees that MQTT always reads a complete, consistent
+    // snapshot and never a partially written one.
+    // -------------------------------------------------------------
+    useA = !useA;
+
+    // Mark parser state flags
     parserHasData = true;
     newParserData = true;
-    py_scheduler.lastCommandFinished = millis();
-    
+
     return PARSE_OK;
+
 }

@@ -7,11 +7,19 @@
 
 extern WebServer server;
 
+/* ---------------------------------------------------------
+   STAT Settings Page
+   - Display name is used as MQTT/JSON key
+   - Allowed characters: A-Z, a-z, 0-9, underscore
+   - All other characters are removed when saving
+   - Bilingual hint (DE/EN)
+   - English comments only
+   --------------------------------------------------------- */
 void handleStatSettingsPage() {
 
     String html;
 
-    html += R"(
+    html += R"STAT(
 <!DOCTYPE html>
 <html lang='de'>
 <head>
@@ -46,14 +54,19 @@ th { background:#eee; }
   background:#0078d7; color:white; border:none; border-radius:5px; cursor:pointer;
 }
 .save-btn:hover { background:#005fa3; }
+.hint {
+  margin-top:10px;
+  font-size:13px;
+  color:#555;
+}
 </style>
 </head>
 <body>
-)";
+)STAT";
 
     html += webSidebar("stat_setting");
 
-    html += R"(
+    html += R"STAT(
 <div class='content'>
   <div class='lang-box'>
     <select id='langSel' onchange='changeLang()'>
@@ -93,6 +106,12 @@ th { background:#eee; }
   <div class='box'>
     <h3 id='parserTitle'>STAT Parser Fields</h3>
 
+    <div class='hint' id='nameHint'>
+      Hinweis: Der Anzeigename wird als MQTT/JSON-Schlüssel verwendet.
+      Erlaubt sind nur Buchstaben (A–Z, a–z), Ziffern (0–9) und Unterstrich (_).
+      Andere Zeichen werden beim Speichern entfernt.
+    </div>
+
     <div id='groups'></div>
 
   </div>
@@ -100,6 +119,10 @@ th { background:#eee; }
   <button class='save-btn' onclick='saveStatSettings()'>Speichern</button>
 
 <script>
+
+/* ---------------------------------------------------------
+   Language switch (DE/EN)
+--------------------------------------------------------- */
 function changeLang(){
   let lang=document.getElementById('langSel').value;
   if(lang==='en'){
@@ -109,24 +132,24 @@ function changeLang(){
     document.getElementById('intervalTitle').innerText='Query Interval';
     document.getElementById('intervalLabel').innerHTML='STAT (seconds)<br>';
     document.getElementById('parserTitle').innerText='STAT Parser Fields';
+    document.getElementById('nameHint').innerText =
+      'Note: Display name is used as MQTT/JSON key. Allowed: A–Z, a–z, 0–9, underscore (_). Other characters are removed on save.';
   } else {
     location.reload();
   }
 }
 
-function mqttChanged(name){
-  let m=document.getElementById('mqtt_'+name);
-  let s=document.getElementById('send_'+name);
-  if(!m.checked){ s.checked=false; }
+/* ---------------------------------------------------------
+   Sanitize display name (MQTT-safe)
+   Allowed: A-Z, a-z, 0-9, underscore
+--------------------------------------------------------- */
+function sanitizeDisplayName(str){
+  return str.replace(/[^A-Za-z0-9_]/g, '');
 }
 
-function sendChanged(name){
-  let m=document.getElementById('mqtt_'+name);
-  let s=document.getElementById('send_'+name);
-  if(s.checked){ m.checked=true; }
-}
-
-// Gruppierungslogik
+/* ---------------------------------------------------------
+   Group detection logic (unchanged)
+--------------------------------------------------------- */
 function detectGroup(name){
   name = name.toLowerCase();
 
@@ -151,12 +174,16 @@ function detectGroup(name){
       name.includes("bmic") || name.includes("cycle"))
     return "System";
 
-  if (name.includes("soh") || name.includes("percent") || name.includes("coulomb") || name.includes("cap"))
+  if (name.includes("percent") || name.includes("coulomb") || name.endsWith(" cap") ||
+     (name.includes("soh") && !name.includes("times")))
     return "Kapazität";
 
   return "Unbekannt";
 }
 
+/* ---------------------------------------------------------
+   Load STAT parser data
+--------------------------------------------------------- */
 function loadData(){
   fetch('/api/stat/get').then(r=>r.json()).then(j=>{
 
@@ -166,7 +193,7 @@ function loadData(){
 
     let groups = {};
 
-    // Felder gruppieren
+    // Group fields
     j.fields.forEach(f=>{
       let g = detectGroup(f.name);
       if (!groups[g]) groups[g] = [];
@@ -176,7 +203,6 @@ function loadData(){
     let container = document.getElementById('groups');
     container.innerHTML = '';
 
-    // Gruppen in Reihenfolge anzeigen
     const order = ["Meta","Zähler","Batterie Fehler","Power Fehler","Temperatur Fehler","System","Kapazität","Unbekannt"];
 
     order.forEach(group=>{
@@ -204,89 +230,150 @@ function loadData(){
       groups[group].forEach(f=>{
         let valCell = (f.sendMQTT && f.value) ? f.value : '—';
 
-        let row = document.createElement('tr');
-        row.innerHTML = `
-          <td>${f.name}</td>
-          <td><input id='disp_${f.name}' value='${f.display}'></td>
-          <td>${f.raw || '—'}</td>
-          <td>
-            <select id='fac_${f.name}'>
-              <option value='1'>1</option>
-              <option value='text'>text</option>
-            </select>
-          </td>
-          <td>
-            <select id='unit_${f.name}'>
-              <option value=''></option>
-              <option value='%'>%</option>
-            </select>
-          </td>
-          <td>${valCell}</td>
-          <td><input type='checkbox' id='mqtt_${f.name}' ${f.sendMQTT ? 'checked' : ''}></td>
-          <td><input type='checkbox' id='send_${f.name}' ${f.sendPayload ? 'checked' : ''}></td>
-        `;
-        tbody.appendChild(row);
-
-        // Auto-Detect
         let factor = f.factor;
         let unit   = f.unit;
         let mqtt   = f.sendMQTT;
         let send   = f.sendPayload;
 
-        let n = f.name.toLowerCase();
+        let n   = f.name.toLowerCase();
         let raw = (f.raw || '').toLowerCase();
 
-        let autoDetect = (factor === '1' && unit === '' && !mqtt && !send && f.raw !== '');
+        let autoDetect = (String(factor) === '1' && unit === '' && !mqtt && !send && f.raw !== '');
 
         if (autoDetect) {
-          if (n.includes("soh") || raw.includes("%")) {
+
+          if (
+            n.includes("percent") ||
+            (n.includes("soh") && !n.includes("times")) ||
+            raw.includes("%")
+          ) {
             factor = '1';
-            unit = '%';
-            mqtt = true;
-            send = true;
+            unit   = '%';
+            mqtt   = true;
+            send   = true;
           }
+
+          else if (n.includes("coulomb") || n.endsWith(" cap")) {
+            factor = '0.001';
+            unit   = 'Ah';
+          }
+
           else if (isNaN(parseFloat(raw))) {
             factor = 'text';
-            unit = '';
-            mqtt = false;
-            send = false;
+            unit   = '';
+          }
+
+          else {
+            factor = '1';
+            unit   = '';
           }
         }
 
-        document.getElementById('fac_' + f.name).value = factor;
-        document.getElementById('unit_' + f.name).value = unit;
-        document.getElementById('mqtt_' + f.name).checked = mqtt;
-        document.getElementById('send_' + f.name).checked = send;
+        let row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${f.name}</td>
+          <td><input value='${f.display}'></td>
+          <td>${f.raw || '—'}</td>
+          <td>
+            <select>
+              <option value='0.0001' ${factor === '0.0001' ? 'selected' : ''}>0.0001</option>
+              <option value='0.001'  ${factor === '0.001'  ? 'selected' : ''}>0.001</option>
+              <option value='0.01'   ${factor === '0.01'   ? 'selected' : ''}>0.01</option>
+              <option value='0.1'    ${factor === '0.1'    ? 'selected' : ''}>0.1</option>
+              <option value='1'      ${factor === '1'      ? 'selected' : ''}>1</option>
+              <option value='10'     ${factor === '10'     ? 'selected' : ''}>10</option>
+              <option value='text'   ${factor === 'text'   ? 'selected' : ''}>text</option>
+              <option value='date'   ${factor === 'date'   ? 'selected' : ''}>date</option>
+            </select>
+          </td>
+          <td>
+            <select>
+              <option value=''         ${unit === ''         ? 'selected' : ''}></option>
+              <option value='V'        ${unit === 'V'        ? 'selected' : ''}>V</option>
+              <option value='A'        ${unit === 'A'        ? 'selected' : ''}>A</option>
+              <option value='Ah'       ${unit === 'Ah'       ? 'selected' : ''}>Ah</option>
+              <option value='°C'       ${unit === '°C'       ? 'selected' : ''}>°C</option>
+              <option value='%'        ${unit === '%'        ? 'selected' : ''}>%</option>
+              <option value='timestamp'${unit === 'timestamp'? 'selected' : ''}>timestamp</option>
+            </select>
+          </td>
+          <td>${valCell}</td>
+          <td><input type='checkbox' class='mqtt' ${mqtt ? 'checked' : ''}></td>
+          <td><input type='checkbox' class='send' ${send ? 'checked' : ''}></td>
+        `;
+        tbody.appendChild(row);
       });
     });
+
   });
 }
 
+/* ---------------------------------------------------------
+   Checkbox logic (MQTT ↔ Send)
+--------------------------------------------------------- */
+document.addEventListener("change", function(e) {
+  let target = e.target;
+
+  if (target.classList.contains("mqtt")) {
+    let row = target.closest("tr");
+    let sendBox = row.querySelector(".send");
+    if (!target.checked && sendBox) {
+      sendBox.checked = false;
+    }
+  }
+
+  if (target.classList.contains("send")) {
+    let row = target.closest("tr");
+    let mqttBox = row.querySelector(".mqtt");
+    if (target.checked && mqttBox) {
+      mqttBox.checked = true;
+    }
+  }
+});
+
+/* ---------------------------------------------------------
+   Save STAT settings
+   (Display name is sanitized before saving)
+--------------------------------------------------------- */
 function saveStatSettings(){
-  let data={
+  let data = {
     enable_stat: document.getElementById('enable_stat').checked,
-    interval_stat:parseInt(document.getElementById('interval_stat').value),
-    mqtt_stat:document.getElementById('mqtt_stat').value,
-    fields:[]
+    interval_stat: parseInt(document.getElementById('interval_stat').value),
+    mqtt_stat: document.getElementById('mqtt_stat').value,
+    fields: []
   };
 
-  document.querySelectorAll('tbody tr').forEach(row=>{
-    let name=row.cells[0].innerText;
+  document.querySelectorAll('tbody tr').forEach(row => {
+
+    let name = row.cells[0].innerText;
+
+    let dispInput = row.cells[1].querySelector("input");
+    let dispRaw   = dispInput.value || name;
+
+    // Sanitize display name
+    let dispClean = sanitizeDisplayName(dispRaw);
+    dispInput.value = dispClean;
+
+    let factor  = row.cells[3].querySelector("select").value;
+    let unit    = row.cells[4].querySelector("select").value;
+    let mqtt    = row.cells[6].querySelector("input").checked;
+    let send    = row.cells[7].querySelector("input").checked;
+
     data.fields.push({
-      name:name,
-      display:document.getElementById('disp_'+name).value,
-      factor:document.getElementById('fac_'+name).value,
-      unit:document.getElementById('unit_'+name).value,
-      sendMQTT:document.getElementById('mqtt_'+name).checked,
-      sendPayload:document.getElementById('send_'+name).checked
+      name: name,
+      display: dispClean,
+      factor: factor,
+      unit: unit,
+      sendMQTT: mqtt,
+      sendPayload: send
     });
   });
 
-  fetch('/api/stat/set',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(data)
-  }).then(()=>alert('Gespeichert'));
+  fetch('/api/stat/set', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  }).then(() => alert('Gespeichert'));
 }
 
 loadData();
@@ -294,7 +381,7 @@ loadData();
 </div>
 </body>
 </html>
-)";
+)STAT";
 
     server.send(200, "text/html", html);
 }

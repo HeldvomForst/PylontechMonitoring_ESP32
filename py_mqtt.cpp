@@ -1,366 +1,152 @@
-#include "py_mqtt.h"
 #include "py_log.h"
 #include "config.h"
 #include "py_parser_pwr.h"
+#include "py_parser_bat.h"
+#include "py_parser_stat.h"
+#include "py_mqtt.h"
 #include <WiFi.h>
 #include <map>
-
 #include <set>
 
-extern bool parserHasData;
-extern bool newParserData;
+/* ---------------------------------------------------------------------------
+   GLOBAL STATE
+   ---------------------------------------------------------------------------
+   This file implements the MQTT publishing and Home Assistant discovery
+   system for the Pylontech Monitor. It uses a double-buffered ParsedData
+   structure and a discovery state machine to ensure stable MQTT output.
+--------------------------------------------------------------------------- */
 
-extern bool statParserHasData;
-extern int  statParserModuleIndex;
+// Queue from main application (Task 1 → Task 2)
+extern QueueHandle_t mqttQueue;
 
-extern bool batParserHasData;
-extern int  batParserModuleIndex;
+// Parser state flags
+bool parserHasData        = false;
+bool newParserData        = false;
+bool statParserHasData    = false;
+int  statParserModuleIndex = 0;
+bool batParserHasData     = false;
+int  batParserModuleIndex  = 0;
 
+// Discovery triggers
+bool discoveryPwrNeeded   = false;
+bool discoveryBatNeeded   = false;
+bool discoveryStatNeeded  = false;
+
+// Discovery tracking (modules already announced)
 std::set<int> discoveredPwr;
 std::set<int> discoveredBat;
 std::set<int> discoveredStat;
-void PyMqtt::resetDiscovery() {
-    discoveredPwr.clear();
-    discoveredBat.clear();
-    discoveredStat.clear();
 
-    discoverySent = false;
+// Discovery state machine
+enum DiscoveryPhase {
+    DISC_IDLE,
+    DISC_STACK,
+    DISC_PWR,
+    DISC_BAT,
+    DISC_STAT,
+    DISC_DONE
+};
 
-    parserHasData     = true;
-    newParserData     = true;
-    batParserHasData  = true;
-    statParserHasData = true;
+static DiscoveryPhase discoveryPhase = DISC_IDLE;
 
-    Log(LOG_INFO, "MQTT: Discovery reset triggered");
-}
-std::map<String, String> lastMqttValues;
+// Discovery indices
+static size_t discPwrIndex   = 0;
+static size_t discBatModule  = 0;
+static size_t discBatCell    = 0;
+static size_t discBatField   = 0;
+static size_t discStatModule = 0;
+static size_t discStatField  = 0;
 
+// Reconnect timers
 static unsigned long lastReconnectAttempt = 0;
 static unsigned long wifiConnectedSince   = 0;
 
-// Discovery / parser flags
-bool discoverySent = false;
-bool parserHasData = false;
-bool newParserData = false;
-bool statParserHasData = false;
-int  statParserModuleIndex = 0;
-bool batParserHasData = false;
-int  batParserModuleIndex = 0;
+// Double-buffer for parser data
+ParsedData bufferA;
+ParsedData bufferB;
+volatile bool useA = true;
 
-
-
+// MQTT instance
 PyMqtt py_mqtt;
 
-// From parser
-extern BatteryStack lastParsedStack;
-extern std::vector<BatteryModule> lastParsedModules;
-
-// ----------------------------------------------------
-// Helper: make MQTT-safe ID / key
-// ----------------------------------------------------
-
-
-static String make_safe_id(const String& s) {
-    String r = s;
-    r.toLowerCase();
-    for (int i = 0; i < r.length(); i++) {
-        char c = r[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
-            r[i] = '_';
-    }
-    while (r.startsWith("_")) r.remove(0, 1);
-    while (r.endsWith("_"))  r.remove(r.length() - 1);
-    if (r.length() == 0) r = "field";
-    return r;
+int PyMqtt::precisionForUnit(const String& unit) {
+    if (unit == "V")  return 3;
+    if (unit == "A")  return 3;
+    if (unit == "°C") return 1;
+    if (unit == "Ah") return 2;
+    if (unit == "%")  return 0;
+    return 0;
 }
 
-// ----------------------------------------------------
-// Raw values: stack (fixed, computed on ESP)
-// ----------------------------------------------------
-static String getStackRawValue(const String& name) {
-    if (name == "StackVoltAvg") return String(lastParsedStack.avgVoltage_mV);
-    if (name == "StackCurrSum") return String(lastParsedStack.totalCurrent_mA);
-    if (name == "StackTempMax") return String(lastParsedStack.temperature);
-    if (name == "BatteryCount") return String(lastParsedStack.batteryCount);
-    return "";
+bool PyMqtt::precisionDiffersFromDefault(const String& unit) {
+    // HA default is always 0 decimal places
+    int desired = precisionForUnit(unit);
+    return desired != 0;
 }
 
-// ----------------------------------------------------
-// Raw values: module (dynamic, from parser field map)
-// ----------------------------------------------------
-static String getModuleRawValue(int index, const String& name) {
-    const BatteryModule* pm = nullptr;
-    for (const auto& m : lastParsedModules) {
-        if (m.index == index) {
-            pm = &m;
-            break;
-        }
-    }
-    if (!pm || !pm->present) return "";
+/* ---------------------------------------------------------------------------
+   LOGGING HELPERS
+   ---------------------------------------------------------------------------
+   Unified logging wrapper to ensure consistent formatting and log levels.
+--------------------------------------------------------------------------- */
 
-    auto it = pm->fields.find(name);
-    if (it == pm->fields.end()) return "";
+static void logInfo(const String& msg)  { Log(LOG_INFO,  msg); }
+static void logWarn(const String& msg)  { Log(LOG_WARN,  msg); }
+static void logError(const String& msg) { Log(LOG_ERROR, msg); }
+static void logDebug(const String& msg) { Log(LOG_DEBUG, msg); }
 
-    return it->second;
+/* ---------------------------------------------------------------------------
+   DISCOVERY RESET
+   ---------------------------------------------------------------------------
+   Resets the discovery state machine and clears module tracking.
+--------------------------------------------------------------------------- */
+void PyMqtt::resetDiscovery(bool pwr, bool bat, bool stat) {
+
+    if (pwr) discoveredPwr.clear();
+    if (bat) discoveredBat.clear();
+    if (stat) discoveredStat.clear();
+
+    discoveryPhase = DISC_STACK;
+    discPwrIndex   = 0;
+    discBatModule  = 0;
+    discBatCell    = 0;
+    discBatField   = 0;
+    discStatModule = 0;
+    discStatField  = 0;
+
+    discoveryActive = true;
+
+    logInfo("MQTT: Discovery reset triggered");
 }
 
-// ----------------------------------------------------
-// Value computation (factor / text / date)
-// ----------------------------------------------------
-String PyMqtt::computeValue(const String& raw, const FieldConfig& fc) {
-    // Text / Date → keine Berechnung
-    if (fc.factor == "text" || fc.factor == "date") {
-        return raw;
-    }
-
-    // Faktor anwenden
-    float factor = fc.factor.toFloat();
-    float valueC = raw.toFloat() * factor;
-
-    // Temperatur in Fahrenheit umrechnen
-    if (fc.unit == "°C" && config.battery.useFahrenheit) {
-        float valueF = valueC * 1.8f + 32.0f;
-        return String(valueF, 3);
-    }
-
-    // Standardwert (Volt, Ampere, SOC, …)
-    return String(valueC, 3);
-}
-// ----------------------------------------------------
-// Error logging for publish failures
-// ----------------------------------------------------
-void PyMqtt::logPublishFailure(const String& topic) {
-    Log(LOG_WARN, "MQTT publish failed: " + topic);
-    Log(LOG_WARN, "MQTT state = " + String(mqttClient.state()));
-    Log(LOG_WARN, "WiFi state = " + String(WiFi.status()));
-}
-
-// ----------------------------------------------------
-// CENTRAL DISCOVERY FUNCTION
-// ----------------------------------------------------
-void PyMqtt::buildDiscovery(JsonDocument& doc,
-                            const FieldConfig& fc,
-                            const String& name,
-                            const String& stateTopic,
-                            const String& uid,
-                            const String& sensorName,
-                            const String& deviceId,
-                            const String& deviceName)
-{
-    doc.clear();
-
-    String safe = make_safe_id(name);
-
-    doc["name"]           = sensorName;
-    doc["state_topic"]    = stateTopic;
-    doc["unique_id"]      = uid;
-    doc["value_template"] = "{{ value_json." + safe + " }}";
-
-    // device_class
-    if (fc.factor == "date") {
-        doc["device_class"] = "timestamp";
-    }
-    else if (fc.factor != "text") {
-        if (fc.unit == "V") {
-            doc["device_class"] = "voltage";
-        }
-        else if (fc.unit == "A") {
-            doc["device_class"] = "current";
-        }
-        else if (fc.unit == "°C") {
-            doc["device_class"] = "temperature";
-        }
-        else if (fc.unit == "%") {
-            doc["device_class"] = "battery";
-        }
-    }
-
-    // unit_of_measurement (nur für echte Messwerte)
-    if (fc.factor != "text" && fc.factor != "date" && fc.unit.length()) {
-        if (fc.unit == "°C" && config.battery.useFahrenheit) {
-            doc["unit_of_measurement"] = "°F";
-        } else {
-            doc["unit_of_measurement"] = fc.unit;
-        }
-    }
-
-
-    // state_class (nur für echte Messwerte)
-    if (fc.factor != "text" && fc.factor != "date") {
-        doc["state_class"] = "measurement";
-    }
-
-    // device block
-    JsonObject device = doc.createNestedObject("device");
-    JsonArray ids = device.createNestedArray("identifiers");
-    ids.add(deviceId);
-    device["name"]         = deviceName;
-    device["manufacturer"] = "Pylontech ESP32";
-    device["model"]        = "Battery Module";
-}
-
-// ----------------------------------------------------
-// Discovery: stack sensors
-// ----------------------------------------------------
-void PyMqtt::publishDiscoveryStack() {
-    String prefix     = config.mqtt.prefix;
-    String subtopic   = config.mqtt.topicStack;   // Stack-Subtopic bleibt wie er ist
-
-    String devId      = prefix + "_" + subtopic;
-    String devName    = prefix + " " + subtopic;
-    String stateTopic = prefix + "/" + subtopic;
-
-    DynamicJsonDocument doc(512);
-
-    for (auto &kv : config.battery.fields) {
-        const String &name = kv.first;
-        const FieldConfig &fc = kv.second;
-
-        if (!(name.startsWith("Stack") || name == "BatteryCount"))
-            continue;
-
-        if (!fc.send) continue;
-
-        String uid        = devId + "_" + make_safe_id(name);
-        String sensorName = subtopic + " " + fc.label;
-
-        buildDiscovery(doc, fc, name, stateTopic, uid, sensorName, devId, devName);
-
-        String out;
-        serializeJson(doc, out);
-        String topic = "homeassistant/sensor/" + uid + "/config";
-        mqttClient.publish(topic.c_str(), out.c_str(), true);
-        mqttClient.loop();
-        delay(100);
-    }
-}
-
-void PyMqtt::publishDiscoveryBat() {
-    String prefix   = config.mqtt.prefix;
-    String subtopic = config.mqtt.topicPwr;   // Modul-Subtopic (ehemals PWR)
-
-    DynamicJsonDocument doc(512);
-
-    for (const auto& mod : lastParsedModules) {
-        if (!mod.present) continue;
-
-        int idx = mod.index;
-
-        String devId      = prefix + "_" + subtopic + String(idx);
-        String devName    = prefix + " " + subtopic + " " + String(idx);
-        String stateTopic = prefix + "/" + subtopic + "/" + String(idx);
-
-        for (auto &kv : config.battery.fields) {
-            const String &name = kv.first;
-            const FieldConfig &fc = kv.second;
-
-            if (name.startsWith("Stack") || name == "BatteryCount")
-                continue;
-
-            if (!fc.send) continue;
-
-            String uid        = devId + "_" + make_safe_id(name + "_" + String(idx));
-            String sensorName = subtopic + " " + String(idx) + " " + fc.label;
-
-            buildDiscovery(doc, fc, name, stateTopic, uid, sensorName, devId, devName);
-
-            String out;
-            serializeJson(doc, out);
-            String topic = "homeassistant/sensor/" + uid + "/config";
-            mqttClient.publish(topic.c_str(), out.c_str(), true);
-            mqttClient.loop();
-            delay(100);
-        }
-    }
-}
-void PyMqtt::publishDiscoveryBatCells(int moduleIndex) {
-    String prefix   = config.mqtt.prefix;
-    String subtopic = config.mqtt.topicBat;
-
-    DynamicJsonDocument doc(512);
-
-    // EIN Gerät pro Modul für ALLE Zellen
-    String devId   = prefix + "_bat_" + String(moduleIndex);
-    String devName = prefix + " BAT " + String(moduleIndex);
-
-    for (const auto& cell : lastParsedBatCells) {
-
-        // State Topic pro Zelle
-        String stateTopic = prefix + "/" + subtopic + "/" +
-                            String(moduleIndex) + "/cell" + String(cell.cellIndex);
-
-        for (auto &f : cell.fields) {
-
-            if (!config.battery.fields.count(f.name)) continue;
-            const FieldConfig &fc = config.battery.fields[f.name];
-            if (!fc.send) continue;
-
-            // EIN Device → aber eindeutige Sensor-ID
-            String uid = devId + "_cell" + String(cell.cellIndex) + "_" + make_safe_id(f.name);
-
-            String sensorName = "BAT " + String(moduleIndex) +
-                                " Cell " + String(cell.cellIndex) +
-                                " " + fc.label;
-
-            buildDiscovery(doc, fc, f.name, stateTopic, uid, sensorName, devId, devName);
-
-            String out;
-            serializeJson(doc, out);
-            String topic = "homeassistant/sensor/" + uid + "/config";
-            mqttClient.publish(topic.c_str(), out.c_str(), true);
-            mqttClient.loop();
-            delay(50);
-        }
-    }
-}
-void PyMqtt::publishDiscoveryStat(int moduleIndex) {
-    String prefix   = config.mqtt.prefix;
-    String subtopic = config.mqtt.topicStat;
-
-    String devId      = prefix + "_stat_" + String(moduleIndex);
-    String devName    = prefix + " STAT " + String(moduleIndex);
-    String stateTopic = prefix + "/" + subtopic + "/" + String(moduleIndex);
-
-    DynamicJsonDocument doc(512);
-
-    for (auto &f : lastParsedStat.fields) {
-
-        String name = f.name;
-
-        if (!config.battery.fields.count(name)) continue;
-        const FieldConfig &fc = config.battery.fields[name];
-
-        if (!fc.send) continue;
-
-        String uid        = devId + "_" + make_safe_id(name);
-        String sensorName = "STAT " + String(moduleIndex) + " " + fc.label;
-
-        buildDiscovery(doc, fc, name, stateTopic, uid, sensorName, devId, devName);
-
-        String out;
-        serializeJson(doc, out);
-        String topic = "homeassistant/sensor/" + uid + "/config";
-        mqttClient.publish(topic.c_str(), out.c_str(), true);
-        mqttClient.loop();
-        delay(50);
-    }
-}
-// ----------------------------------------------------
-// Begin
-// ----------------------------------------------------
+/* ---------------------------------------------------------------------------
+   BEGIN
+   ---------------------------------------------------------------------------
+   Initializes MQTT client and marks discovery as required.
+--------------------------------------------------------------------------- */
 void PyMqtt::begin() {
     enabled = config.mqtt.enabled;
-    if (!enabled) return;
+    if (!enabled) {
+        logInfo("MQTT disabled in configuration");
+        return;
+    }
 
     mqttClient.setServer(config.mqtt.server.c_str(), config.mqtt.port);
     mqttClient.setBufferSize(2048);
 
-    Log(LOG_INFO, "MQTT: BufferSize set to 2048 bytes");
+    discoveryPwrNeeded  = true;
+    discoveryBatNeeded  = true;
+    discoveryStatNeeded = true;
+
+    logInfo("MQTT: BufferSize set to 2048 bytes");
 }
 
-// ----------------------------------------------------
-// Connect
-// ----------------------------------------------------
+/* ---------------------------------------------------------------------------
+   CONNECT
+   ---------------------------------------------------------------------------
+   Attempts to connect to the MQTT broker. Connection is delayed until WiFi
+   has been stable for at least 10 seconds to avoid rapid reconnect loops.
+--------------------------------------------------------------------------- */
 bool PyMqtt::connect() {
     if (!enabled) return false;
     if (WiFi.status() != WL_CONNECTED) return false;
@@ -368,27 +154,58 @@ bool PyMqtt::connect() {
     if (wifiConnectedSince == 0)
         wifiConnectedSince = millis();
 
+    // Wait 10 seconds after WiFi connects
     if (millis() - wifiConnectedSince < 10000)
         return false;
 
     String clientId = "PylontechMonitor-" + String((uint32_t)ESP.getEfuseMac());
 
-    return mqttClient.connect(clientId.c_str(),
-                              config.mqtt.user.c_str(),
-                              config.mqtt.pass.c_str());
+    bool ok = mqttClient.connect(
+        clientId.c_str(),
+        config.mqtt.user.c_str(),
+        config.mqtt.pass.c_str()
+    );
+
+    if (ok)
+        logInfo("MQTT connected as " + clientId);
+    else
+        logWarn("MQTT connection failed");
+
+    return ok;
 }
 
-// ----------------------------------------------------
-// Loop
-// ----------------------------------------------------
+/* ---------------------------------------------------------------------------
+   RAW PUBLISH (Task 1 → Task 2)
+   ---------------------------------------------------------------------------
+   Publishes raw messages from the queue. Used for low-level or custom topics.
+--------------------------------------------------------------------------- */
+bool PyMqtt::publishRaw(const String& topic, const String& payload) {
+    if (!enabled || !mqttClient.connected()) return false;
+    return mqttClient.publish(topic.c_str(), payload.c_str());
+}
+
+/* ---------------------------------------------------------------------------
+   LOOP (Task 2)
+   ---------------------------------------------------------------------------
+   Main MQTT loop:
+   - Handles reconnects
+   - Processes queue messages
+   - Publishes PWR/BAT/STAT data
+   - Runs discovery state machine
+--------------------------------------------------------------------------- */
 void PyMqtt::loop() {
     if (!enabled) return;
 
+    // Select active buffer
+    ParsedData localCopy = useA ? bufferA : bufferB;
+
+    // WiFi not ready
     if (WiFi.status() != WL_CONNECTED) {
         wifiConnectedSince = 0;
         return;
     }
 
+    // MQTT reconnect
     if (!mqttClient.connected()) {
         if (millis() - lastReconnectAttempt > 3000) {
             lastReconnectAttempt = millis();
@@ -397,161 +214,351 @@ void PyMqtt::loop() {
         return;
     }
 
-    // Discovery nur einmal
-    // PWR Discovery + Publisher
+    /* ------------------------------------------------
+       1) Process queued MQTT messages
+       ------------------------------------------------ */
+    MqttMessage msg;
+    while (xQueueReceive(mqttQueue, &msg, 0) == pdTRUE) {
+        publishRaw(String(msg.topic), String(msg.payload));
+    }
+
+    /* ------------------------------------------------
+       2) Publish PWR + Stack data
+       ------------------------------------------------ */
     if (newParserData) {
 
-        publishStack();
+        publishStack(localCopy.stack);
 
-        for (const auto& mod : lastParsedModules) {
+        for (const auto& mod : localCopy.modules) {
             if (!mod.present) continue;
-
-            int idx = mod.index;
-
-            // PWR Discovery (unverändert)
-            if (!discoveredPwr.count(idx)) {
-                publishDiscoveryBat();   // dein alter PWR-Discoverer
-                discoveredPwr.insert(idx);
-            }
-
-            // PWR Publisher
-            publishBat(idx, mod);
+            publishBat(mod.index, mod);
         }
 
         newParserData = false;
     }
 
-    // BAT Discovery + Publisher
+    /* ------------------------------------------------
+       3) Publish BAT cell data
+       ------------------------------------------------ */
     if (batParserHasData) {
 
         int idx = batParserModuleIndex;
 
-        if (!discoveredBat.count(idx)) {
-            publishDiscoveryBatCells(idx);
+        if (!discoveredBat.count(idx))
             discoveredBat.insert(idx);
-        }
 
-        publishBatCells(idx);
+        publishBatCells(idx, localCopy.batCells);
         batParserHasData = false;
     }
 
-    // STAT Discovery + Publisher
+    /* ------------------------------------------------
+       4) Publish STAT data
+       ------------------------------------------------ */
     if (statParserHasData) {
 
         int idx = statParserModuleIndex;
 
-        if (!discoveredStat.count(idx)) {
-            publishDiscoveryStat(idx);
+        if (!discoveredStat.count(idx))
             discoveredStat.insert(idx);
-        }
 
-        publishStat(idx);
+        publishStat(idx, localCopy.stat);
         statParserHasData = false;
     }
 
-    // PWR → Modul-Daten
-    if (newParserData) {
-        publishStack();
+    /* ------------------------------------------------
+       5) Trigger discovery if needed
+       ------------------------------------------------ */
+    if (mqttClient.connected()) {
 
-        for (const auto& mod : lastParsedModules) {
-            if (!mod.present) continue;
-            publishBat(mod.index, mod);   // ← PWR Publisher
+        if ((discoveryPhase == DISC_IDLE || discoveryPhase == DISC_DONE) &&
+            (discoveryPwrNeeded || discoveryBatNeeded || discoveryStatNeeded)) {
+
+            resetDiscovery(
+                discoveryPwrNeeded,
+                discoveryBatNeeded,
+                discoveryStatNeeded
+            );
+
+            discoveryPwrNeeded  = false;
+            discoveryBatNeeded  = false;
+            discoveryStatNeeded = false;
         }
-
-        newParserData = false;
     }
 
-    // BAT → Zell-Daten
-    if (batParserHasData) {
-        publishBatCells(batParserModuleIndex);
-        batParserHasData = false;
-    }
+    // Run discovery state machine
+    handleDiscoveryStep(localCopy);
 
-
-    // STAT → Status-Daten
-    if (statParserHasData) {
-        publishStat(statParserModuleIndex);      // ← STAT Publisher
-        statParserHasData = false;
-    }
-
+    /* ------------------------------------------------
+       6) MQTT client loop
+       ------------------------------------------------ */
     mqttClient.loop();
 }
 
-// ----------------------------------------------------
-// Stack publish (one JSON for all stack values)
-// ----------------------------------------------------
-void PyMqtt::publishStack() {
-    if (!enabled || !mqttClient.connected() || !parserHasData) return;
+/* ---------------------------------------------------------------------------
+   DISCOVERY STATE MACHINE (FRAMEWORK ONLY)
+   ---------------------------------------------------------------------------
+   The detailed discovery functions (publishDiscoveryStack, publishDiscoveryPwr,
+   publishDiscoveryBatField, publishDiscoveryStatField) will be implemented in
+   PART 3.
+--------------------------------------------------------------------------- */
+void PyMqtt::handleDiscoveryStep(const ParsedData& localCopy) {
+    if (!enabled || !mqttClient.connected()) return;
 
-    String prefix   = config.mqtt.prefix;
-    String subtopic = config.mqtt.topicStack;
+    switch (discoveryPhase) {
 
-    String topic = prefix + "/" + subtopic;
-    DynamicJsonDocument doc(1024);
+        case DISC_IDLE:
+        case DISC_DONE:
+            return;
 
-    for (auto &kv : config.battery.fields) {
-        const String &name = kv.first;
-        const FieldConfig &fc = kv.second;
+        case DISC_STACK:
+            publishDiscoveryStack();
+            discoveryPhase = DISC_PWR;
+            discPwrIndex   = 0;
+            return;
 
-        if (!(name.startsWith("Stack") || name == "BatteryCount"))
-            continue;
+        case DISC_PWR:
+            if (discPwrIndex >= localCopy.modules.size()) {
+                discoveryPhase = DISC_BAT;
+                discBatModule = discBatCell = discBatField = 0;
+                return;
+            }
 
-        if (!fc.mqtt) continue;
+            if (!localCopy.modules[discPwrIndex].present) {
+                discPwrIndex++;
+                return;
+            }
 
-        String raw = getStackRawValue(name);
-        if (raw.length() == 0) continue;
+            publishDiscoveryPwrModule(localCopy.modules[discPwrIndex].index);
+            discPwrIndex++;
+            return;
 
-        String value = computeValue(raw, fc);
-        String safe  = make_safe_id(name);
+        case DISC_BAT: {
 
-        if (fc.factor == "text" || fc.factor == "date") {
-            doc[safe] = value;
-        } else {
-            doc[safe] = value.toFloat();
+            if (discBatModule >= localCopy.modules.size()) {
+                discoveryPhase = DISC_STAT;
+                discStatModule = 0;
+                return;
+            }
+
+            int moduleIndex = localCopy.modules[discBatModule].index;
+
+            if (!localCopy.modules[discBatModule].present) {
+                discBatModule++;
+                return;
+            }
+
+            // Nur Zellen discovern (keine Modul-Felder)
+            for (size_t i = 0; i < localCopy.batCells.size(); i++) {
+                publishDiscoveryBatCell(moduleIndex, i);
+                vTaskDelay(5);
+            }
+
+            discBatModule++;
+            return;
+        }
+
+        case DISC_STAT: {
+
+            if (discStatModule >= localCopy.modules.size()) {
+                discoveryPhase = DISC_DONE;
+                return;
+            }
+
+            int moduleIndex = localCopy.modules[discStatModule].index;
+
+            if (!localCopy.modules[discStatModule].present) {
+                discStatModule++;
+                return;
+            }
+
+            // Neuer Discoverer: Modulweise, nicht Feldweise
+            publishDiscoveryStatModule(moduleIndex);
+
+            discStatModule++;
+            return;
         }
     }
+}
+/* ---------------------------------------------------------------------------
+   NAME NORMALIZATION
+   ---------------------------------------------------------------------------
+   Converts display names into safe MQTT/JSON identifiers:
+   - Removes spaces and special characters
+   - Converts to CamelCase
+   - Ensures Home Assistant compatibility
+--------------------------------------------------------------------------- */
+String PyMqtt::normalizeName(const String& in) {
+    String out;
+    bool upperNext = true;
+
+    for (char c : in) {
+        if (c == ' ' || c == '_' || c == '-' || c == '.') {
+            upperNext = true;
+            continue;
+        }
+        if (!isalnum(c)) continue;
+
+        if (upperNext) {
+            out += (char)toupper(c);
+            upperNext = false;
+        } else {
+            out += (char)c;
+        }
+    }
+    return out;
+}
+
+/* ---------------------------------------------------------------------------
+   ID SANITIZER
+   ---------------------------------------------------------------------------
+   Builds Home Assistant safe identifiers:
+   - lowercase
+   - only [a-z0-9_]
+   - spaces and separators → underscore
+--------------------------------------------------------------------------- */
+static String sanitizeId(const String& in) {
+    String out;
+    out.reserve(in.length());
+    for (char c : in) {
+        if (c >= 'A' && c <= 'Z') {
+            out += char(c + 32); // tolower
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            out += c;
+        } else if (c == '_' || c == '-' || c == ' ' || c == '/' || c == '.') {
+            out += '_';
+        } else {
+            // ignore other characters
+        }
+    }
+    return out;
+}
+
+/* ---------------------------------------------------------------------------
+   DECIMAL PRECISION BASED ON UNIT
+--------------------------------------------------------------------------- */
+int PyMqtt::decimalsForUnit(const String& unit) {
+    if (unit == "V")  return 3;   // voltage
+    if (unit == "A")  return 3;   // current
+    if (unit == "°C") return 1;   // temperature
+    if (unit == "%")  return 0;   // percentage
+    if (unit == "Ah") return 3;   // capacity
+    return 0;                     // default
+}
+
+/* ---------------------------------------------------------------------------
+   DEVICE CLASS BASED ON UNIT
+--------------------------------------------------------------------------- */
+String PyMqtt::deviceClassForUnit(const String& unit) {
+    if (unit == "V")  return "voltage";
+    if (unit == "A")  return "current";
+    if (unit == "°C") return "temperature";
+    if (unit == "%")  return "battery";
+    return "";
+}
+
+/* ---------------------------------------------------------------------------
+   COMPUTE VALUE (NUMERIC OR TEXT)
+--------------------------------------------------------------------------- */
+String PyMqtt::computeValue(const String& raw, const FieldConfig& fc) {
+
+    // Time fields → always text
+    if (fc.factor == "date" || fc.unit == "timestamp")
+        return raw;
+
+    // Text fields → unchanged
+    if (fc.factor == "text")
+        return raw;
+
+    // Numeric conversion
+    float factor = fc.factor.toFloat();
+    float valueC = raw.toFloat() * factor;
+
+    // Time fields → convert "YYYY-MM-DD HH:MM:SS" → "YYYY-MM-DDTHH:MM:SS"
+    if (fc.factor == "date" || fc.unit == "timestamp") {
+        String iso = raw;
+        iso.replace(" ", "T");
+        return iso;
+    }
+
+
+    // Fahrenheit conversion if enabled
+    if (fc.unit == "°C" && config.battery.useFahrenheit) {
+        float valueF = valueC * 1.8f + 32.0f;
+        return String(valueF, decimalsForUnit("°F"));
+    }
+
+    return String(valueC, decimalsForUnit(fc.unit));
+}
+
+/* ---------------------------------------------------------------------------
+   BUILD MQTT TOPIC
+--------------------------------------------------------------------------- */
+String PyMqtt::buildTopic(
+    const String& subtopic,
+    int moduleIndex,
+    const String& fieldName,
+    int cellIndex,
+    bool isCell
+) {
+    String prefix = config.mqtt.prefix;
+    String cellPrefix = config.mqtt.cellPrefix; // e.g. "Cell"
+
+    if (isCell) {
+        return prefix + "/" + subtopic + "/" +
+               String(moduleIndex) + "/" +
+               cellPrefix + String(cellIndex) + "_" + fieldName;
+    }
+
+    return prefix + "/" + subtopic + "/" +
+           String(moduleIndex) + "/" + fieldName;
+}
+
+/* ---------------------------------------------------------------------------
+   PUBLISH STACK JSON
+--------------------------------------------------------------------------- */
+void PyMqtt::publishStack(const BatteryStack& stack) {
+    if (!enabled || !mqttClient.connected() || !parserHasData) return;
+
+    String topic = config.mqtt.prefix + "/" + config.mqtt.topicStack;
+
+    StaticJsonDocument<256> doc;
+    doc["StackVoltAvg"] = stack.avgVoltage_mV / 1000.0f;
+    doc["StackCurrSum"] = stack.totalCurrent_mA / 1000.0f;
+    doc["StackTempMax"] = stack.temperature / 1000.0f;
+    doc["BatteryCount"] = stack.batteryCount;
 
     String payload;
     serializeJson(doc, payload);
 
-    Log(LOG_DEBUG, "MQTT: Stack JSON length = " + String(payload.length()));
-
-    if (!mqttClient.publish(topic.c_str(), payload.c_str()))
-        logPublishFailure(topic);
+    mqttClient.publish(topic.c_str(), payload.c_str());
 }
 
-// ----------------------------------------------------
-// Module publish (one JSON per battery, dynamic fields)
-// ----------------------------------------------------
+/* ---------------------------------------------------------------------------
+   PUBLISH PWR MODULE JSON
+--------------------------------------------------------------------------- */
 void PyMqtt::publishBat(int index, const BatteryModule& mod) {
-    if (!enabled || !mqttClient.connected() || !parserHasData || !mod.present) return;
+    if (!enabled || !mqttClient.connected() || !parserHasData || !mod.present)
+        return;
 
-    String prefix   = config.mqtt.prefix;
-    String subtopic = config.mqtt.topicPwr;   // Modul-Subtopic
+    String subtopic = config.mqtt.topicPwr;
+    String topic = config.mqtt.prefix + "/" + subtopic + "/" + String(index);
 
-    String topic = prefix + "/" + subtopic + "/" + String(index);
-    DynamicJsonDocument doc(1024);
+    StaticJsonDocument<512> doc;
 
-    for (auto &kv : config.battery.fields) {
-        const String& name = kv.first;
+    for (auto &kv : config.battery.fieldsPwr) {
+        const String& fieldName = kv.first;
         const FieldConfig& fc = kv.second;
-
-        if (name.startsWith("Stack") || name == "BatteryCount")
-            continue;
 
         if (!fc.mqtt) continue;
 
-        String raw = getModuleRawValue(index, name);
-        if (raw.length() == 0) continue;
+        auto it = mod.fields.find(fieldName);
+        if (it == mod.fields.end()) continue;
 
-        String value = computeValue(raw, fc);
-        String safe  = make_safe_id(name);
+        String display = normalizeName(fc.display);
+        String value = computeValue(it->second, fc);
 
-        if (fc.factor == "text" || fc.factor == "date") {
-            doc[safe] = value;
-        } else {
-            doc[safe] = value.toFloat();
-        }
+        doc[display] = value.c_str();
+
     }
 
     config.lastMqttContact = config.getCurrentTimeString();
@@ -559,95 +566,508 @@ void PyMqtt::publishBat(int index, const BatteryModule& mod) {
     String payload;
     serializeJson(doc, payload);
 
-    Log(LOG_DEBUG, "MQTT: Module " + String(index) + " JSON length = " + String(payload.length()));
-
     if (!mqttClient.publish(topic.c_str(), payload.c_str()))
-        logPublishFailure(topic);
+        logWarn("MQTT publish failed: " + topic);
 }
 
-void PyMqtt::publishBatCells(int moduleIndex) {
+/* ---------------------------------------------------------------------------
+   PUBLISH BAT CELLS JSON
+--------------------------------------------------------------------------- */
+void PyMqtt::publishBatCells(int moduleIndex, const std::vector<BatData>& batCells) {
     if (!enabled || !mqttClient.connected()) return;
-    if (lastParsedBatCells.empty()) return;
+    if (batCells.empty()) return;
 
-    String prefix   = config.mqtt.prefix;
     String subtopic = config.mqtt.topicBat;
 
-    // Jede Zelle einzeln senden
-    for (const auto& cell : lastParsedBatCells) {
+    for (const auto& cell : batCells) {
 
-        // Topic: prefix/bat/<moduleIndex>/cell<cellIndex>
-        String topic = prefix + "/" + subtopic + "/" +
-                       String(moduleIndex) + "/cell" + String(cell.cellIndex);
-
-        DynamicJsonDocument doc(1024);
+        StaticJsonDocument<512> doc;
 
         for (auto &f : cell.fields) {
 
-            if (!config.battery.fields.count(f.name)) continue;
-            const FieldConfig &fc = config.battery.fields[f.name];
+            // Feld existiert in der BAT-Konfiguration?
+            if (!config.battery.fieldsBat.count(f.name)) continue;
+            const FieldConfig &fc = config.battery.fieldsBat[f.name];
             if (!fc.mqtt) continue;
 
-            String safe  = make_safe_id(f.name);
+            // WICHTIG:
+            // Discovery benutzt fc.display als JSON-Key → Publisher muss das auch tun
+            String key   = fc.display;
             String value = computeValue(f.raw, fc);
 
-            if (fc.factor == "text" || fc.factor == "date")
-                doc[safe] = value;
-            else
-                doc[safe] = value.toFloat();
+            doc[key] = value;
         }
 
         String payload;
         serializeJson(doc, payload);
 
-        Log(LOG_INFO,
-            "MQTT BAT: sending module " + String(moduleIndex) +
-            " cell " + String(cell.cellIndex) +
-            " to topic " + topic +
-            " (len=" + String(payload.length()) + ")");
+        String topic =
+            config.mqtt.prefix + "/" + subtopic + "/" +
+            String(moduleIndex) + "/" +
+            config.mqtt.cellPrefix + String(cell.cellIndex);
 
         mqttClient.publish(topic.c_str(), payload.c_str());
     }
 }
 
-void PyMqtt::publishStat(int moduleIndex) {
+/* ---------------------------------------------------------------------------
+   PUBLISH STAT JSON
+--------------------------------------------------------------------------- */
+void PyMqtt::publishStat(int moduleIndex, const StatData& stat) {
     if (!enabled || !mqttClient.connected()) return;
     if (!config.battery.enableStat) return;
-    if (lastParsedStat.fields.empty()) return;
+    if (stat.fields.empty()) return;
 
-    String prefix   = config.mqtt.prefix;
     String subtopic = config.mqtt.topicStat;
+    String topic = config.mqtt.prefix + "/" + subtopic + "/" + String(moduleIndex);
 
-    // Topic: prefix/stat/<moduleIndex>
-    String topic = prefix + "/" + subtopic + "/" + String(moduleIndex);
+    StaticJsonDocument<1024> doc;
 
-    DynamicJsonDocument doc(1024);
+    for (auto &f : stat.fields) {
 
-    for (auto &f : lastParsedStat.fields) {
-
-        String name = f.name;
-        String raw  = f.raw;
-
-        if (!config.battery.fields.count(name)) continue;
-        FieldConfig &fc = config.battery.fields[name];
-
+        if (!config.battery.fieldsStat.count(f.name)) continue;
+        const FieldConfig &fc = config.battery.fieldsStat[f.name];
         if (!fc.mqtt) continue;
 
-        String value = computeValue(raw, fc);
-        String safe  = make_safe_id(name);
+        String display = normalizeName(fc.display);
+        String value = computeValue(f.raw, fc);
 
-        if (fc.factor == "text" || fc.factor == "date") {
-            doc[safe] = value;
-        } else {
-            doc[safe] = value.toFloat();
-        }
+        doc[display] = value.c_str();
+
     }
 
     String payload;
     serializeJson(doc, payload);
 
-    Log(LOG_INFO, "MQTT STAT: sending module " + String(moduleIndex) +
-                  " to topic " + topic + " (len=" + String(payload.length()) + ")");
-
     if (!mqttClient.publish(topic.c_str(), payload.c_str()))
-        logPublishFailure(topic);
+        logWarn("MQTT publish failed: " + topic);
+}
+/* ---------------------------------------------------------------------------
+   BUILD DISCOVERY IDENTIFIERS
+   ---------------------------------------------------------------------------
+   Creates:
+   - unique_id
+   - object_id
+   - friendly_name
+   - discovery topic
+--------------------------------------------------------------------------- */
+void PyMqtt::buildDiscoveryIds(
+    String& uniqueId,
+    String& objectId,
+    String& friendlyName,
+    String& discoveryTopic,
+    const String& subtopic,
+    int moduleIndex,
+    const String& displayName,
+    int cellIndex,
+    bool isCell
+) {
+    String prefix     = config.mqtt.prefix;
+    String cellPrefix = config.mqtt.cellPrefix; // e.g. "Cell"
+
+    // Base name: BAT5_Cell13_Voltage
+    String base;
+    if (isCell)
+        base = subtopic + String(moduleIndex) + "_" +
+               cellPrefix + String(cellIndex) + "_" + displayName;
+    else
+        base = subtopic + String(moduleIndex) + "_" + displayName;
+
+    // unique_id: Pylontech_BAT5_Cell13_Voltage
+    uniqueId = prefix + "_" + base;
+
+    // object_id: BAT5_Cell13_Voltage
+    objectId = base;
+
+    // friendly_name: Pylontech BAT5 Cell13 Voltage
+    if (isCell)
+        friendlyName = prefix + " " + subtopic + String(moduleIndex) +
+                       " " + cellPrefix + String(cellIndex) + " " + displayName;
+    else
+        friendlyName = prefix + " " + subtopic + String(moduleIndex) +
+                       " " + displayName;
+
+    // Discovery topic:
+    // homeassistant/sensor/Pylontech_BAT5_Cell13_Voltage/config
+    discoveryTopic =
+        "homeassistant/sensor/" + uniqueId + "/config";
+}
+
+/* ---------------------------------------------------------------------------
+   ADD DISCOVERY METADATA (unit, device_class, precision)
+--------------------------------------------------------------------------- */
+void PyMqtt::addDiscoveryMeta(
+    JsonDocument& doc,
+    const FieldConfig& fc
+) {
+    // Time fields → no metadata
+    if (fc.factor == "date" || fc.unit == "timestamp")
+        return;
+
+    // Numeric fields
+    int dec = decimalsForUnit(fc.unit);
+    String devClass = deviceClassForUnit(fc.unit);
+
+    if (devClass.length() > 0)
+        doc["device_class"] = devClass;
+
+    if (fc.unit.length() > 0)
+        doc["unit_of_measurement"] = fc.unit;
+
+    doc["state_class"] = "measurement";
+    doc["suggested_display_precision"] = dec;
+}
+
+/* ---------------------------------------------------------------------------
+   DISCOVERY: STACK
+--------------------------------------------------------------------------- */
+void PyMqtt::publishDiscoveryStack() {
+    if (!enabled || !mqttClient.connected()) return;
+
+    String prefix = config.mqtt.prefix;
+    String sub    = config.mqtt.topicStack;
+    String stateTopic = prefix + "/" + sub;
+
+    // Cleaned prefix for IDs
+    String prefixId = sanitizeId(prefix);
+
+    StaticJsonDocument<256> docStack;
+    docStack["StackVoltAvg"] = lastParsedStack.avgVoltage_mV / 1000.0f;
+    docStack["StackCurrSum"] = lastParsedStack.totalCurrent_mA / 1000.0f;
+    docStack["StackTempMax"] = lastParsedStack.temperature / 1000.0f;
+    docStack["BatteryCount"] = lastParsedStack.batteryCount;
+
+    for (JsonPair kv : docStack.as<JsonObject>()) {
+
+        String key = kv.key().c_str();   // z.B. "StackVoltAvg"
+        String fullName = key;           // Anzeigename in HA
+
+        // Build unique_id and entity_id from cleaned prefix + key
+        String uniqueId = prefixId + "_stack_" + sanitizeId(key);
+
+        String entityId = uniqueId;      // HA macht später sensor.<entityId>
+        // entityId ist bereits lowercase/safe durch sanitizeId
+
+        String discTopic = "homeassistant/sensor/" + uniqueId + "/config";
+
+        StaticJsonDocument<512> doc;
+
+        // Sichtbarer Name in HA (unverändert)
+        doc["name"]   = fullName;
+        doc["uniq_id"] = uniqueId;
+        doc["obj_id"]  = entityId;
+
+        doc["state_topic"]    = stateTopic;
+        doc["value_template"] = "{{ value_json." + key + " }}";
+
+        // Unit detection
+        String unit = "";
+        if (key == "StackVoltAvg") unit = "V";
+        else if (key == "StackCurrSum") unit = "A";
+        else if (key == "StackTempMax") unit = "°C";
+        else if (key == "BatteryCount") unit = "";
+
+        // Suggested precision only if different from HA default (0)
+        if (precisionDiffersFromDefault(unit)) {
+            doc["suggested_display_precision"] = precisionForUnit(unit);
+        }
+
+        // Device class + unit
+        if (unit == "V") {
+            doc["device_class"] = "voltage";
+            doc["unit_of_measurement"] = "V";
+        }
+        else if (unit == "A") {
+            doc["device_class"] = "current";
+            doc["unit_of_measurement"] = "A";
+        }
+        else if (unit == "°C") {
+            doc["device_class"] = "temperature";
+            doc["unit_of_measurement"] = "°C";
+        }
+
+        doc["state_class"] = "measurement";
+
+        JsonObject dev = doc.createNestedObject("dev");
+        dev["ids"]  = prefixId;          // Geräte-ID auch bereinigt
+        dev["name"] = prefix + " Stack"; // sichtbarer Name unverändert
+
+        String payload;
+        serializeJson(doc, payload);
+
+        mqttClient.publish(discTopic.c_str(), payload.c_str(), true);
+
+        vTaskDelay(5);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   DISCOVERY: PWR MODULE
+   ---------------------------------------------------------------------------
+   - Visible names (doc["name"]) remain exactly as user entered them
+   - unique_id, obj_id, dev.ids are sanitized for HA compatibility
+   - JSON keys use normalizeName(fc.display) exactly like publishBat()
+   - Text + Date fields send NO metadata (HA would reject them otherwise)
+--------------------------------------------------------------------------- */
+void PyMqtt::publishDiscoveryPwrModule(int moduleIndex) {
+    if (!enabled || !mqttClient.connected()) return;
+
+    String prefix      = config.mqtt.prefix;        // visible
+    String prefixId    = sanitizeId(prefix);        // HA-safe
+    String subtopic    = config.mqtt.topicPwr;      // visible
+    String subtopicId  = sanitizeId(subtopic);      // HA-safe
+    String stateTopic  = prefix + "/" + subtopic + "/" + String(moduleIndex);
+
+    for (auto &kv : config.battery.fieldsPwr) {
+
+        const String& fieldName = kv.first;
+        const FieldConfig& fc   = kv.second;
+
+        if (!fc.mqtt) continue;
+
+        // JSON key used by publisher
+        String displayKey = normalizeName(fc.display);
+
+        // Visible name in HA
+        String friendly = fc.display;
+
+        // Build unique_id (HA-safe)
+        String uniqueId =
+            prefixId + "_" +
+            subtopicId + "_" +
+            String(moduleIndex) + "_" +
+            sanitizeId(displayKey);
+
+        // Entity ID (HA will prepend sensor.)
+        String entityId = uniqueId;
+
+        // Discovery topic
+        String discTopic =
+            "homeassistant/sensor/" + uniqueId + "/config";
+
+        StaticJsonDocument<512> doc;
+
+        // Visible name in HA (unchanged)
+        doc["name"]    = friendly;
+        doc["uniq_id"] = uniqueId;
+        doc["obj_id"]  = entityId;
+
+        // State topic
+        doc["state_topic"] = stateTopic;
+
+        // Template must match publisher JSON key
+        doc["value_template"] =
+            "{{ value_json." + displayKey + " }}";
+
+        /* ---------------------------------------------------------
+           TEXT FIELDS → no metadata at all
+        --------------------------------------------------------- */
+        if (fc.factor == "text") {
+            // No device_class, no unit, no precision, no state_class
+        }
+
+        /* ---------------------------------------------------------
+           DATE/TIMESTAMP → treat as text
+           (Publisher already converts " " → "T")
+        --------------------------------------------------------- */
+        else if (fc.factor == "date" || fc.unit == "timestamp") {
+            // Also no metadata
+        }
+
+        /* ---------------------------------------------------------
+           NUMERIC FIELDS → normal metadata
+        --------------------------------------------------------- */
+        else {
+            addDiscoveryMeta(doc, fc);
+        }
+
+        // Device block
+        JsonObject dev = doc.createNestedObject("dev");
+        dev["ids"]  = prefixId + "_pwr_" + String(moduleIndex);
+        dev["name"] = prefix + " PWR " + String(moduleIndex);
+
+        // Publish retained
+        String payload;
+        serializeJson(doc, payload);
+        mqttClient.publish(discTopic.c_str(), payload.c_str(), true);
+
+        vTaskDelay(5);
+    }
+}
+/* ---------------------------------------------------------------------------
+   DISCOVERY: BAT CELL FIELD
+--------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   DISCOVERY: BAT CELL FIELD
+   ---------------------------------------------------------------------------
+   - Visible names (doc["name"]) remain exactly as user entered them
+   - unique_id, obj_id, dev.ids are sanitized for HA compatibility
+   - JSON keys use fc.display exactly like publishBatCells()
+--------------------------------------------------------------------------- */
+void PyMqtt::publishDiscoveryBatCell(int moduleIndex, int cellIndex) {
+    if (!enabled || !mqttClient.connected()) return;
+
+    String prefix      = config.mqtt.prefix;        // visible
+    String prefixId    = sanitizeId(prefix);        // HA-safe
+    String subtopic    = config.mqtt.topicBat;      // visible
+    String subtopicId  = sanitizeId(subtopic);      // HA-safe
+
+    String stateTopic =
+        prefix + "/" + subtopic + "/" +
+        String(moduleIndex) + "/" +
+        config.mqtt.cellPrefix + String(cellIndex);
+
+    for (auto &kv : config.battery.fieldsBat) {
+
+        const String& fieldName = kv.first;
+        const FieldConfig& fc   = kv.second;
+        if (!fc.mqtt) continue;
+
+        // JSON key used by publisher (BAT uses fc.display directly)
+        String key = fc.display;
+
+        // Visible name in HA
+        String friendly = "Cell " + String(cellIndex) + " " + fc.display;
+
+        // Build unique_id (HA-safe)
+        String uniqueId =
+            prefixId + "_" +
+            subtopicId + "_" +
+            String(moduleIndex) + "_cell" +
+            String(cellIndex) + "_" +
+            sanitizeId(key);
+
+        // Entity ID (HA will prepend sensor.)
+        String entityId = uniqueId;
+
+        // Discovery topic
+        String discTopic =
+            "homeassistant/sensor/" + uniqueId + "/config";
+
+        StaticJsonDocument<512> doc;
+
+        // Visible name in HA (unchanged)
+        doc["name"]    = friendly;
+        doc["uniq_id"] = uniqueId;
+        doc["obj_id"]  = entityId;
+
+        // State topic
+        doc["state_topic"] = stateTopic;
+
+        // Template must match publisher JSON key
+        doc["value_template"] =
+            "{{ value_json." + key + " }}";
+
+        // Unit + device_class + precision
+        bool isNumeric =
+            !(fc.factor == "text" ||
+              fc.factor == "date" ||
+              fc.unit   == "timestamp");
+
+        if (isNumeric) {
+            if (precisionDiffersFromDefault(fc.unit))
+                doc["suggested_display_precision"] = precisionForUnit(fc.unit);
+
+            if (fc.unit == "V")  doc["device_class"] = "voltage";
+            if (fc.unit == "A")  doc["device_class"] = "current";
+            if (fc.unit == "°C") doc["device_class"] = "temperature";
+            if (fc.unit == "%")  doc["device_class"] = "battery";
+            if (fc.unit == "Ah") doc["device_class"] = "energy";
+
+            if (fc.unit.length() > 0)
+                doc["unit_of_measurement"] = fc.unit;
+
+            doc["state_class"] = "measurement";
+        }
+
+        // Device block
+        JsonObject dev = doc.createNestedObject("dev");
+        dev["ids"]  = prefixId + "_bat_" + String(moduleIndex);
+        dev["name"] = prefix + " BAT " + String(moduleIndex);
+
+        // Publish retained
+        String payload;
+        serializeJson(doc, payload);
+        mqttClient.publish(discTopic.c_str(), payload.c_str(), true);
+
+        vTaskDelay(5);
+    }
+}
+/* ---------------------------------------------------------------------------
+   DISCOVERY: STAT FIELD
+--------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   DISCOVERY: STAT MODULE
+   ---------------------------------------------------------------------------
+   - Visible names (doc["name"]) remain exactly as user entered them
+   - unique_id, obj_id, dev.ids are sanitized for HA compatibility
+   - JSON keys use normalizeName(fc.display) exactly like publishStat()
+--------------------------------------------------------------------------- */
+void PyMqtt::publishDiscoveryStatModule(int moduleIndex) {
+    if (!enabled || !mqttClient.connected()) return;
+    if (!config.battery.enableStat) return;
+
+    String prefix      = config.mqtt.prefix;        // visible
+    String prefixId    = sanitizeId(prefix);        // HA-safe
+    String subtopic    = config.mqtt.topicStat;     // visible
+    String subtopicId  = sanitizeId(subtopic);      // HA-safe
+
+    String stateTopic =
+        prefix + "/" + subtopic + "/" + String(moduleIndex);
+
+    for (auto &kv : config.battery.fieldsStat) {
+
+        const String& fieldName = kv.first;
+        const FieldConfig& fc   = kv.second;
+        if (!fc.mqtt) continue;
+
+        // JSON key used by publisher
+        String displayKey = normalizeName(fc.display);
+
+        // Visible name in HA
+        String friendly = fc.display;
+
+        // Build unique_id (HA-safe)
+        String uniqueId =
+            prefixId + "_" +
+            subtopicId + "_" +
+            String(moduleIndex) + "_" +
+            sanitizeId(displayKey);
+
+        // Entity ID (HA will prepend sensor.)
+        String entityId = uniqueId;
+
+        // Discovery topic
+        String discTopic =
+            "homeassistant/sensor/" + uniqueId + "/config";
+
+        StaticJsonDocument<512> doc;
+
+        // Visible name in HA (unchanged)
+        doc["name"]    = friendly;
+        doc["uniq_id"] = uniqueId;
+        doc["obj_id"]  = entityId;
+
+        // State topic
+        doc["state_topic"] = stateTopic;
+
+        // Template must match publisher JSON key
+        doc["value_template"] =
+            "{{ value_json." + displayKey + " }}";
+
+        // Unit + device_class + precision
+        addDiscoveryMeta(doc, fc);
+
+        // Device block
+        JsonObject dev = doc.createNestedObject("dev");
+        dev["ids"]  = prefixId + "_stat_" + String(moduleIndex);
+        dev["name"] = prefix + " STAT " + String(moduleIndex);
+
+        // Publish retained
+        String payload;
+        serializeJson(doc, payload);
+        mqttClient.publish(discTopic.c_str(), payload.c_str(), true);
+
+        vTaskDelay(5);
+    }
 }

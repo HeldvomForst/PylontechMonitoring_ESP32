@@ -9,9 +9,9 @@ extern WebServer server;
 
 /* ---------------------------------------------------------
    BAT Settings Page
-   - Display name is used as MQTT/JSON key
-   - Allowed characters: A-Z, a-z, 0-9, underscore
-   - All other characters are removed when saving
+   - Anzeigename wird für MQTT/HA verwendet
+   - Erlaubte Zeichen: A-Z, a-z, 0-9, Unterstrich
+   - Alle anderen Zeichen werden beim Speichern entfernt
    --------------------------------------------------------- */
 void handleBatSettingsPage() {
 
@@ -126,10 +126,6 @@ th { background:#eee; }
   <button class='save-btn' onclick='saveBatSettings()'>Speichern</button>
 
 <script>
-
-/* ---------------------------------------------------------
-   Language switch (DE/EN)
---------------------------------------------------------- */
 function changeLang(){
   let lang=document.getElementById('langSel').value;
   if(lang==='en'){
@@ -155,16 +151,23 @@ function changeLang(){
   }
 }
 
-/* ---------------------------------------------------------
-   Sanitize display name: only A-Z, a-z, 0-9, underscore
---------------------------------------------------------- */
+function mqttChanged(name){
+  let m=document.getElementById('mqtt_'+name);
+  let s=document.getElementById('send_'+name);
+  if(!m.checked){ s.checked=false; }
+}
+
+function sendChanged(name){
+  let m=document.getElementById('mqtt_'+name);
+  let s=document.getElementById('send_'+name);
+  if(s.checked){ m.checked=true; }
+}
+
+// Sanitize Anzeigename: nur A-Z, a-z, 0-9, _
 function sanitizeDisplayName(str){
   return str.replace(/[^A-Za-z0-9_]/g, '');
 }
 
-/* ---------------------------------------------------------
-   Load BAT parser data
---------------------------------------------------------- */
 function loadData(){
   fetch('/api/bat/get').then(r=>r.json()).then(j=>{
 
@@ -180,6 +183,7 @@ function loadData(){
       let row = document.createElement('tr');
       let valCell = (f.sendMQTT && f.value) ? f.value : '—';
 
+      // Anzeigename beim Laden nicht verändern, nur anzeigen
       let disp = f.display || f.name;
 
       row.innerHTML = `
@@ -223,47 +227,60 @@ function loadData(){
       let n = f.name.toLowerCase();
       let raw = (f.raw || '').toLowerCase();
 
-      // Auto-detect only if no config exists yet
+      // Auto-Detect nur wenn noch keine Config existiert
       let autoDetect = (factor === '1' && unit === '' && !mqtt && !send && f.raw !== '');
 
       if (autoDetect) {
 
+        // 1. Prozent
         if (raw.includes('%')) {
           factor = '1';
           unit = '%';
           mqtt = false;
           send = false;
         }
+
+        // 2. mAH → Ah
         else if (raw.includes('mah')) {
           factor = '0.001';
           unit = 'Ah';
           mqtt = false;
           send = false;
         }
+
+        // 3. Nicht numerisch → Text
         else if (isNaN(parseFloat(raw))) {
           factor = 'text';
           unit = '';
           mqtt = false;
           send = false;
         }
+
+        // 4. Volt
         else if (n.includes('volt')) {
           factor = '0.001';
           unit = 'V';
           mqtt = false;
           send = false;
         }
+
+        // 5. Curr
         else if (n.includes('curr')) {
           factor = '0.001';
           unit = 'A';
           mqtt = false;
           send = false;
         }
+
+        // 6. Tempr
         else if (n.includes('tempr')) {
           factor = '0.001';
           unit = '°C';
           mqtt = false;
           send = false;
         }
+
+        // 7. Rest
         else {
           factor = '1';
           unit = '';
@@ -280,9 +297,6 @@ function loadData(){
   });
 }
 
-/* ---------------------------------------------------------
-   Save BAT settings
---------------------------------------------------------- */
 function saveBatSettings(){
   let data={
     enable_bat: document.getElementById('enable_bat').checked,
@@ -297,9 +311,9 @@ function saveBatSettings(){
     let dispInput = document.getElementById('disp_'+name);
     let dispRaw   = dispInput.value || name;
 
-    // Clean display name for MQTT/JSON
+    // Anzeigename für MQTT/JSON säubern
     let dispClean = sanitizeDisplayName(dispRaw);
-    dispInput.value = dispClean;
+    dispInput.value = dispClean; // dem Nutzer direkt zeigen
 
     data.fields.push({
       name:name,

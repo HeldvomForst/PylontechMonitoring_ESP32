@@ -4,28 +4,37 @@
 #include "py_uart.h"
 #include "config.h"
 
-
+enum SchedState {
+    SCHED_INIT_WAIT,
+    SCHED_SEND_PWR,
+    SCHED_SEND_BAT,
+    SCHED_SEND_STAT,
+    SCHED_NORMAL
+};
 
 class PyScheduler {
 public:
     void begin(PyUart* u);
-
-    // Manuelles Einreihen (Console, Web-UI)
+    void loop();
     void enqueue(const String& cmd);
 
-    // Hauptschleife
-    void loop();
-    unsigned long lastCommandFinished = 0;
+    bool hasQueuedCommand() const;
+    String popNextCommand();
+
+    unsigned long lastCommandFinished = 0;   // Task1 setzt das
 
 private:
     void scheduleAutomatic();
-    void processQueue();
 
     PyUart* uart = nullptr;
 
+    unsigned long lastLoop = 0;
     unsigned long lastPwr  = 0;
     unsigned long lastBat  = 0;
     unsigned long lastStat = 0;
+
+    SchedState state = SCHED_INIT_WAIT;
+    unsigned long stateStart = 0;
 
     std::vector<String> queue;
 };

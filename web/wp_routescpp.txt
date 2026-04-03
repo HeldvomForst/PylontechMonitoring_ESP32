@@ -126,39 +126,7 @@ static void handleApiLastFrame() {
 //  API: WiFi
 // ---------------------------------------------------------
 static void handleApiWifiStatus() {
-    WifiStatus s = WiFiManagerModule::getStatus();
-
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "application/json", "");
-
-    server.sendContent("{");
-
-    server.sendContent("\"mode\":\"");
-    server.sendContent(s.mode);
-    server.sendContent("\",");
-
-    server.sendContent("\"connected\":");
-    server.sendContent(s.connected ? "true" : "false");
-    server.sendContent(",");
-
-    server.sendContent("\"ssid\":\"");
-    server.sendContent(s.ssid);
-    server.sendContent("\",");
-
-    server.sendContent("\"rssi\":");
-    server.sendContent(String(s.rssi));
-    server.sendContent(",");
-
-    server.sendContent("\"ip\":\"");
-    server.sendContent(s.ip);
-    server.sendContent("\",");
-
-    server.sendContent("\"mac\":\"");
-    server.sendContent(s.mac);
-    server.sendContent("\"");
-
-    server.sendContent("}");
-    server.sendContent("");
+    server.send(200, "application/json", WiFiManagerModule::getStatusJson());
 }
 
 static void handleApiWifiScan() {
@@ -204,7 +172,7 @@ static void handleApiWifiConnect() {
 //  API: Network Config
 // ---------------------------------------------------------
 static void handleApiNetGet() {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(256);
 
     doc["static"] = config.useStaticIP;
     doc["ip"]     = config.ipAddr;
@@ -238,6 +206,7 @@ static void handleApiNetSet() {
     config.save();
     server.send(200, "text/plain", "Network settings saved");
 }
+
 // ---------------------------------------------------------
 //  API: NTP Server
 // ---------------------------------------------------------
@@ -294,22 +263,33 @@ static void handleApiNtpSet() {
 static void handleApiTimeGet() {
     DynamicJsonDocument doc(512);
 
+    // Manual mode
     doc["manual_mode"] = config.manual_mode;
     doc["manual_date"] = config.manual_date;
     doc["manual_time"] = config.manual_time;
     doc["manual_dst"]  = config.manual_dst;
 
+    // NTP modes
     doc["use_gateway_ntp"] = config.use_gateway_ntp;
     doc["manual_ntp"]      = config.manual_ntp;
     doc["server"]          = config.ntpServer;
-    doc["timezone"]        = config.timezone;
 
-    // Region + City aus IANA extrahieren
-    String tz = config.timezone;
+    // Timezone (IANA)
+    doc["timezone"] = config.timezone;
+
+    // ---------------------------------------------
+    // NEW: Region + City extracted from IANA string
+    // ---------------------------------------------
+    String tz = config.timezone;  // e.g. "Europe/Berlin"
     int slash = tz.indexOf('/');
 
-    doc["region"] = (slash > 0) ? tz.substring(0, slash) : "Europe";
-    doc["city"]   = (slash > 0) ? tz.substring(slash + 1) : "Berlin";
+    if (slash > 0) {
+        doc["region"] = tz.substring(0, slash);
+        doc["city"]   = tz.substring(slash + 1);
+    } else {
+        doc["region"] = "Europe";
+        doc["city"]   = "Berlin";
+    }
 
     String out;
     serializeJson(doc, out);
@@ -328,20 +308,24 @@ static void handleApiTimeSet() {
         return;
     }
 
+    // Manual mode
     config.manual_mode = req["manual_mode"] | false;
     config.manual_date = req["manual_date"] | "";
     config.manual_time = req["manual_time"] | "";
     config.manual_dst  = req["manual_dst"]  | false;
 
+    // NTP modes
     config.use_gateway_ntp = req["use_gateway_ntp"] | true;
     config.manual_ntp      = req["manual_ntp"]      | false;
     config.ntpServer       = req["server"]          | "pool.ntp.org";
 
+    // Timezone (IANA string)
     config.timezone = req["timezone"] | "Europe/Berlin";
 
     config.save();
     server.send(200, "text/plain", "Time settings saved");
 }
+
 // ---------------------------------------------------------
 //  API: Timezones (Region → City → IANA)
 // ---------------------------------------------------------
@@ -400,14 +384,14 @@ static void handleApiTimezones() {
 //  API: MQTT Config
 // ---------------------------------------------------------
 static void handleApiMqttGet() {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(256);
 
     doc["enabled"] = config.mqtt.enabled;
     doc["server"]  = config.mqtt.server;
     doc["port"]    = config.mqtt.port;
     doc["user"]    = config.mqtt.user;
-    doc["pass"]    = "";
-    doc["topic"]   = config.mqtt.prefix;
+    doc["pass"]    = config.mqtt.pass;
+    doc["topic"]  = config.mqtt.prefix;
 
     String out;
     serializeJson(doc, out);
@@ -430,12 +414,7 @@ static void handleApiMqttSet() {
     config.mqtt.server  = req["server"]  | "";
     config.mqtt.port    = req["port"]    | 1883;
     config.mqtt.user    = req["user"]    | "";
-    if (req.containsKey("pass")) {
-        String newPass = req["pass"].as<String>();
-        if (newPass.length() > 0) {
-            config.mqtt.pass = newPass;   // Nur setzen, wenn wirklich eingegeben
-        }
-    }
+    config.mqtt.pass    = req["pass"]    | "";
     config.mqtt.prefix  = req["topic"]   | "Pylontech";
 
     config.save();

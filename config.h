@@ -2,21 +2,40 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <map>
+#include <vector>
 
-// ----------------------------------------------------
-//  Single parser field configuration
-// ----------------------------------------------------
-struct FieldConfig {
-    String label;     // Display name
-    String factor;    // Conversion factor ("1", "0.001", "%", "text")
-    String unit;      // Unit ("V", "A", "°C", "%", "")
-    bool mqtt;        // MQTT enabled
-    bool send;        // Send in MQTT payload
+// ---------------------------------------------------------
+// Timezone entry structure (Region → City → IANA → POSIX)
+// ---------------------------------------------------------
+struct TimezoneEntry {
+    const char* region;
+    const char* city;
+    const char* tzName;
+    const char* posix;
 };
 
-// ----------------------------------------------------
-//  Battery configuration
-// ----------------------------------------------------
+extern const TimezoneEntry TIMEZONES[];
+extern const size_t TIMEZONE_COUNT;
+
+String getTimezoneJson();
+String findPosixForTimezone(const String& tzName);
+
+// ---------------------------------------------------------
+// FieldConfig
+// ---------------------------------------------------------
+
+struct FieldConfig {
+    String label;      // UI label
+    String display;    // NEW: MQTT display name (CamelCase)
+    String factor;
+    String unit;
+    bool mqtt;
+    bool send;
+};
+
+// ---------------------------------------------------------
+// Battery configuration
+// ---------------------------------------------------------
 struct BatteryConfig {
     unsigned long intervalPwr  = 60000;
     unsigned long intervalBat  = 300000;
@@ -27,12 +46,14 @@ struct BatteryConfig {
 
     bool useFahrenheit = false;
 
-    std::map<String, FieldConfig> fields;
+    std::map<String, FieldConfig> fieldsPwr;
+    std::map<String, FieldConfig> fieldsBat;
+    std::map<String, FieldConfig> fieldsStat;
 };
 
-// ----------------------------------------------------
-//  MQTT configuration
-// ----------------------------------------------------
+// ---------------------------------------------------------
+// MQTT configuration
+// ---------------------------------------------------------
 struct MqttConfig {
     bool enabled = false;
 
@@ -46,16 +67,104 @@ struct MqttConfig {
     String topicPwr   = "pwr";
     String topicBat   = "bat";
     String topicStat  = "stat";
+    String cellPrefix = "Cell";   // NEW: configurable cell prefix
 
     String mode = "active";
 };
 
-// ----------------------------------------------------
-//  AppConfig
-// ----------------------------------------------------
+// ---------------------------------------------------------
+// Battery data structures (PWR / BAT / STAT)
+// ---------------------------------------------------------
+struct BatteryModule {
+    bool present = false;
+    int index = 0;
+    int voltage_mV = 0;
+    int current_mA = 0;
+    int temperature = 0;
+    int soc = 0;
+    std::map<String, String> fields;
+};
+
+struct BatteryStack {
+    int batteryCount = 0;
+    int avgVoltage_mV = 0;
+    int totalCurrent_mA = 0;
+    int temperature = 0;
+    int soc = 0;
+
+    void reset() {
+        batteryCount = 0;
+        avgVoltage_mV = 0;
+        totalCurrent_mA = 0;
+        temperature = 0;
+        soc = 0;
+    }
+};
+
+struct BatField {
+    String name;
+    String raw;
+    // int moduleIndex;  // optional
+};
+
+struct BatData {
+    int moduleIndex;               // NEW: module number (1..N)
+    int cellIndex = -1;
+    std::vector<BatField> fields;
+};
+
+struct StatField {
+    String name;
+    String raw;
+};
+
+struct StatData {
+    int moduleIndex = -1;
+    std::vector<StatField> fields;
+};
+
+// ---------------------------------------------------------
+// ParsedData + Double Buffer
+// ---------------------------------------------------------
+struct ParsedData {
+    BatteryStack stack;
+    std::vector<BatteryModule> modules;
+    std::vector<BatData> batCells;
+    StatData stat;
+};
+
+extern ParsedData bufferA;
+extern ParsedData bufferB;
+extern volatile bool useA;
+
+enum ParseResult {
+    PARSE_OK,
+    PARSE_FAIL,
+    PARSE_IGNORED
+};
+
+
+// ---------------------------------------------------------
+// Parser / MQTT Flags
+// ---------------------------------------------------------
+extern bool parserHasData;
+extern bool newParserData;
+
+extern bool batParserHasData;
+extern int  batParserModuleIndex;
+
+extern bool statParserHasData;
+extern int  statParserModuleIndex;
+
+extern bool discoveryPwrNeeded;
+extern bool discoveryBatNeeded;
+extern bool discoveryStatNeeded;
+
+// ---------------------------------------------------------
+// AppConfig
+// ---------------------------------------------------------
 class AppConfig {
 public:
-    // ===== 1. Basic settings =====
     String deviceName = "PylontechMonitor";
     String hostname   = "";
     String wifiSSID   = "";
@@ -64,68 +173,72 @@ public:
     String apPass     = "";
     bool setupDone    = false;
 
-    // ===== 2. Network =====
     bool useStaticIP = false;
     String ipAddr     = "";
     String subnetMask = "";
     String gateway    = "";
     String dns        = "";
 
-    // ===== 2.1 NTP =====
     String ntpServer = "pool.ntp.org";
-    // ===== 2.2 Timezone & DST =====
-    // IANA timezone name (e.g. "Europe/Berlin", "America/New_York")
+    bool manual_mode = false;
+    bool manual_dst = false;
+    bool use_gateway_ntp = true;
+    bool manual_ntp = false;
+    String manual_date = "";
+    String manual_time = "";
+
     String timezone = "Europe/Berlin";
-
-    // Enable or disable daylight saving time (DST)
     bool daylightSaving = true;
+    uint32_t ntpResyncInterval = 86400;
 
-    // NTP resync interval in seconds (default: 24h)
-    uint32_t ntpResyncInterval = 86400; 
-
-
-    // ===== 3. MQTT =====
     MqttConfig mqtt;
-
-    // ===== 4. Battery =====
     BatteryConfig battery;
 
-    // ===== 5. Dashboard fields =====
-    String firmwareVersion = "0.Beta.3";
+    String firmwareVersion = "0.Beta.4";
     String currentTime     = "";
     String lastPwrUpdate   = "";
     uint16_t detectedModules = 0;
 
-    // ===== 6. MQTT status for dashboard =====
     String lastMqttContact = "";
 
-    // ===== Methods =====
     void load();
     void save();
+
+    void loadSystemConfig();
+    void saveSystemConfig();
+
+    void loadPwrConfig();
+    void savePwrConfig();
+    void loadPwrFields();
+    void savePwrFields();
+
+    void loadBatConfig();
+    void saveBatConfig();
+    void loadBatFields();
+    void saveBatFields();
+
+    void loadStatConfig();
+    void saveStatConfig();
+    void loadStatFields();
+    void saveStatFields();
+
     void clearNVS();
     void factoryDefaults();
     void factoryReset();
-    void generateDefaultsIfNeeded();
 
-    // Uptime helper
     String uptimeString();
-    
-    // Time helpers
     String getCurrentTimeString();
     bool isSystemTimeValid();
 
-    //log level 
     bool logInfo  = true;
     bool logWarn  = true;
     bool logError = true;
     bool logDebug = false;
 
-
-
-
 private:
     String generateHostname();
+    void saveJsonChunked(const char* ns, const char* prefix, const String& json);
+    String loadJsonChunked(const char* ns, const char* prefix);
 };
 
-// Global instance
 extern AppConfig config;

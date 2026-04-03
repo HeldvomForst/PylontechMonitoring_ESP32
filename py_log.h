@@ -14,3 +14,8 @@ void Log(LogLevel lvl, const String& msg);
 void WebLog(const String& msg);
 String WebLogGet();
 void WebLogClear();
+
+void PersistentLog(const String& msg);
+String PersistentLogDump();
+extern bool persistentLoggingEnabled;
+

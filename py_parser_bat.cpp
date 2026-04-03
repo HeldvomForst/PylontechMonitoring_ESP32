@@ -3,15 +3,24 @@
 #include "py_uart.h"
 #include "py_mqtt.h"
 #include "py_scheduler.h"
+#include "config.h"
 
-extern PyMqtt py_mqtt;
 extern PyUart py_uart;
-extern PyScheduler py_scheduler;
+extern QueueHandle_t mqttQueue;
 
-// Eine BAT-Antwort enthält ALLE Zellen eines Moduls.
-// Wir speichern sie als Liste von Zellen.
-BatData lastParsedBat;                    // optional, erste Zelle
-std::vector<BatData> lastParsedBatCells;  // eine BatData pro Zelle
+extern bool batParserHasData;
+extern int  batParserModuleIndex;
+extern bool discoveryBatNeeded;
+
+// Global BAT storage (for web UI)
+BatData lastParsedBat;
+std::vector<BatData> lastParsedBatCells;
+
+// Double buffer extern
+extern ParsedData bufferA;
+extern ParsedData bufferB;
+extern volatile bool useA;
+
 
 // ---------------------------------------------------------
 // Helper: trim whitespace
@@ -37,8 +46,7 @@ static bool extractFrame(const String& raw, String& frame) {
 }
 
 // ---------------------------------------------------------
-// Spalten anhand von 2+ Leerzeichen trennen
-// 1 Leerzeichen gehört zum Text
+// Split columns by 2+ spaces
 // ---------------------------------------------------------
 static std::vector<String> splitColumns(const String& line) {
     std::vector<String> out;
@@ -46,7 +54,6 @@ static std::vector<String> splitColumns(const String& line) {
     int start = 0;
 
     while (start < len) {
-        // führende Leerzeichen überspringen
         while (start < len && line[start] == ' ') start++;
         if (start >= len) break;
 
@@ -57,7 +64,7 @@ static std::vector<String> splitColumns(const String& line) {
             char c = line[end];
             if (c == ' ') {
                 spaceCount++;
-                if (spaceCount >= 2) break;   // 2+ Leerzeichen = Trenner
+                if (spaceCount >= 2) break;
             } else {
                 spaceCount = 0;
             }
@@ -85,7 +92,9 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
     out.cellIndex = -1;
     lastParsedBatCells.clear();
 
-    // 1) Letztes Kommando prüfen
+    // ---------------------------------------------------------
+    // 1) Check if this frame belongs to BAT
+    // ---------------------------------------------------------
     String last = py_uart.getLastCommand();
     String lastLower = last;
     lastLower.trim();
@@ -96,6 +105,7 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
         return PARSE_IGNORED;
     }
 
+    // Extract module index from command (bat1, bat2, ...)
     String num = lastLower.substring(3);
     num.trim();
     int moduleIdx = num.toInt();
@@ -104,7 +114,18 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
         return PARSE_IGNORED;
     }
 
-    // 2) Frame prüfen
+    // Assign module index to the output structure
+    out.moduleIndex = moduleIdx;
+
+
+    if (moduleIdx < 1 || moduleIdx > 16) {
+        Log(LOG_WARN, "BAT parser: invalid module index '" + last + "'");
+        return PARSE_IGNORED;
+    }
+
+    // ---------------------------------------------------------
+    // 2) Validate frame
+    // ---------------------------------------------------------
     if (!py_uart.isFrameValid()) {
         Log(LOG_WARN, "BAT parser: skipping invalid frame");
         return PARSE_FAIL;
@@ -112,17 +133,21 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
 
     Log(LOG_INFO, "BAT parser: raw frame received for module " + String(moduleIdx));
 
+    // ---------------------------------------------------------
+    // 3) Extract @ ... $$ section
+    // ---------------------------------------------------------
     String frame;
     if (!extractFrame(raw, frame)) {
         Log(LOG_WARN, "BAT parser: no valid @ ... $$ frame found");
         return PARSE_FAIL;
     }
 
-    // Zeilenenden normalisieren
     frame.replace("\r\n", "\n");
     frame.replace("\r", "\n");
 
-    // 3) Zeilen splitten
+    // ---------------------------------------------------------
+    // 4) Split into lines
+    // ---------------------------------------------------------
     std::vector<String> lines;
     {
         int pos = 0;
@@ -144,18 +169,22 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
         return PARSE_FAIL;
     }
 
-    // 4) Header: erste Zeile mit 2+ Leerzeichen trennen
+    // ---------------------------------------------------------
+    // 5) Header
+    // ---------------------------------------------------------
     std::vector<String> header = splitColumns(lines[0]);
     if (header.empty()) {
         Log(LOG_WARN, "BAT parser: empty header");
         return PARSE_FAIL;
     }
 
-    // 5) Zellzeilen parsen
+    // ---------------------------------------------------------
+    // 6) Parse cell rows
+    // ---------------------------------------------------------
     for (int row = 1; row < (int)lines.size(); row++) {
         String line = lines[row];
 
-        // Ende erkannt: z.B. "Command completed successfully"
+        // Stop at non‑numeric first token
         String firstToken = line;
         firstToken.trim();
         int spacePos = firstToken.indexOf(' ');
@@ -165,10 +194,8 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
         if (firstToken.length() == 0)
             continue;
 
-        // Zahl in erster Spalte = gültige Datenzeile
         if (!isDigit(firstToken[0])) {
-            // kein Digit → keine Datenzeile mehr → abbrechen
-            break;
+            break; // end of data
         }
 
         std::vector<String> cols = splitColumns(line);
@@ -177,7 +204,8 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
         size_t count = min(header.size(), cols.size());
 
         BatData cell;
-        cell.cellIndex = row - 1;   // 0-basiert
+        cell.cellIndex = row - 1;
+        cell.moduleIndex = moduleIdx;
 
         for (size_t c = 0; c < count; c++) {
             BatField f;
@@ -189,21 +217,52 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
         lastParsedBatCells.push_back(cell);
     }
 
+    // ---------------------------------------------------------
+    // 7) Store first cell for convenience
+    // ---------------------------------------------------------
     if (!lastParsedBatCells.empty()) {
-        lastParsedBat = lastParsedBatCells[0];
-        out = lastParsedBat;
+        out = lastParsedBatCells[0];
+        lastParsedBat = out;
+
     }
 
-    extern bool batParserHasData;
-    extern int  batParserModuleIndex;
+    Log(LOG_INFO, "BAT parser: parsed " + String(lastParsedBatCells.size()) +
+                " cells for module " + String(moduleIdx));
 
-    batParserHasData     = true;
+    // ---------------------------------------------------------
+    // 8) Double Buffer Write (POINTER VERSION)
+    // ---------------------------------------------------------
+    //
+    // Select the target buffer *after* the BAT frame has been fully
+    // validated and parsed. We do NOT toggle before writing, because
+    // that would expose MQTT to a partially written buffer.
+    //
+    ParsedData* target = useA ? &bufferB : &bufferA;
+
+    // Write the complete BAT cell list into the selected buffer
+    target->batCells = lastParsedBatCells;
+
+    // -------------------------------------------------------------
+    // Toggle the active buffer ONLY AFTER the frame is fully written.
+    // This guarantees that MQTT always reads a complete, consistent
+    // snapshot and never a partially written one.
+    // -------------------------------------------------------------
+    useA = !useA;
+
+    // Parser flags for MQTT
+    batParserHasData = true;
     batParserModuleIndex = moduleIdx;
 
-    Log(LOG_INFO, "BAT parser: parsed " + String(lastParsedBatCells.size()) +
-                  " cells for module " + String(moduleIdx));
+    // Detect new BAT fields (for Home Assistant discovery)
+    static size_t lastBatFieldCount = 0;
+    size_t currentFieldCount =
+        lastParsedBatCells.empty() ? 0 : lastParsedBatCells[0].fields.size();
 
-    py_scheduler.lastCommandFinished = millis();
+    if (currentFieldCount != lastBatFieldCount) {
+        discoveryBatNeeded = true;
+    }
+    lastBatFieldCount = currentFieldCount;
 
     return PARSE_OK;
+
 }

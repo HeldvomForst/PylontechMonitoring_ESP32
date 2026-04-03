@@ -89,81 +89,78 @@ static void startSTAFromPrefsOrSecrets() {
     startSTA(ssid, pass);
 }
 
-// Map IANA timezone + DST flag to TZ string
-// NOTE: extend this table as needed
-static String mapTimezoneToTZ(const String& tzName, bool dstEnabled) {
-    // Europe/Berlin
-    if (tzName == "Europe/Berlin") {
-        if (dstEnabled) {
-            // CET-1CEST,M3.5.0/02:00:00,M10.5.0/03:00:00
-            return "CET-1CEST,M3.5.0/02:00:00,M10.5.0/03:00:00";
-        } else {
-            return "CET-1";
-        }
+
+WifiStatus WiFiManagerModule::getStatus() {
+    WifiStatus s;
+
+    bool sta = (WiFi.status() == WL_CONNECTED && hasValidIP());
+
+    if (sta) {
+        s.mode = "STA";
+        s.connected = true;
+    } else if (apActive) {
+        s.mode = "AP";
+        s.connected = false;
+    } else {
+        s.mode = "none";
+        s.connected = false;
     }
 
-    // Europe/London
-    if (tzName == "Europe/London") {
-        if (dstEnabled) {
-            return "GMT0BST,M3.5.0/01:00:00,M10.5.0/02:00:00";
-        } else {
-            return "GMT0";
-        }
-    }
+    s.ssid = WiFi.SSID();
+    s.rssi = WiFi.RSSI();
+    s.ip   = WiFi.localIP().toString();
+    s.mac  = WiFi.macAddress();
 
-    // America/New_York
-    if (tzName == "America/New_York") {
-        if (dstEnabled) {
-            return "EST+5EDT,M3.2.0/02:00:00,M11.1.0/02:00:00";
-        } else {
-            return "EST+5";
-        }
-    }
-
-    // Asia/Tokyo (no DST)
-    if (tzName == "Asia/Tokyo") {
-        return "JST-9";
-    }
-
-    // Fallback: UTC
-    return "UTC0";
+    return s;
 }
 
-// Apply timezone and DST settings to system
+// Map IANA timezone + DST flag to TZ string
+// NOTE: extend this table as needed
 static void applyTimezoneFromConfig() {
-    String tzString = mapTimezoneToTZ(config.timezone, config.daylightSaving);
+    String tzString = findPosixForTimezone(config.timezone);
     setenv("TZ", tzString.c_str(), 1);
     tzset();
     Log(LOG_INFO, "WiFiManager: timezone set to " + config.timezone +
                   " (TZ=" + tzString + ")");
 }
 
-// Check if system time is valid (NTP synced)
-static bool isSystemTimeValid() {
-    time_t now;
-    time(&now);
-    // Rough check: any time after 2023-01-01 is considered valid
-    return (now > 1700000000);
-}
-
-// Format current system time as string
-static String getCurrentTimeString() {
-    time_t now;
-    time(&now);
-
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-
-    char buf[32];
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
-    return String(buf);
-}
 
 // Trigger NTP sync via configTime (non-blocking)
 static void triggerNtpSync() {
+
+    // Manual time mode → no NTP
+    if (config.manual_mode) {
+        Log(LOG_INFO, "WiFiManager: manual time mode → skipping NTP sync");
+        return;
+    }
+
+    // Gateway as NTP server
+    if (config.use_gateway_ntp) {
+        IPAddress gw = WiFi.gatewayIP();
+        if (gw != IPAddress(0,0,0,0)) {
+            config.ntpServer = gw.toString();
+            Log(LOG_INFO, "WiFiManager: using gateway as NTP server: " + config.ntpServer);
+        } else {
+            Log(LOG_WARN, "WiFiManager: gateway not available → fallback to pool.ntp.org");
+            config.ntpServer = "pool.ntp.org";
+        }
+    }
+
+    // Manual NTP server
+    else if (config.manual_ntp) {
+        Log(LOG_INFO, "WiFiManager: using manual NTP server: " + config.ntpServer);
+    }
+
+    // Default NTP server
+    else {
+        config.ntpServer = "pool.ntp.org";
+        Log(LOG_INFO, "WiFiManager: using default NTP server: pool.ntp.org");
+    }
+
     applyTimezoneFromConfig();
     configTime(0, 0, config.ntpServer.c_str());
     lastNtpResyncMillis = millis();
+
     Log(LOG_INFO, "WiFiManager: NTP sync requested, server=" + config.ntpServer);
 }
 
@@ -172,10 +169,15 @@ static void handleNtpLogic() {
     // Initial sync: wait until system time becomes valid
     if (!ntpInitialSynced && config.isSystemTimeValid()) {
         ntpInitialSynced = true;
-        String t = config.getCurrentTimeString();
 
-        config.currentTime = t;   // store last sync time
+        // Jetzt erst TZ anwenden
+        applyTimezoneFromConfig();
+
+        // Zeit erneut holen (jetzt mit DST)
+        String t = config.getCurrentTimeString();
+        config.currentTime = t;
         config.save();
+
         Log(LOG_INFO, "WiFiManager: NTP initial sync → " + t);
     }
 
@@ -203,10 +205,6 @@ void WiFiManagerModule::begin() {
 
     // Start STA from stored credentials or config
     startSTAFromPrefsOrSecrets();
-
-    // Prepare timezone + NTP (will sync once STA is connected)
-    applyTimezoneFromConfig();
-    triggerNtpSync();
 }
 
 void WiFiManagerModule::loop() {
@@ -413,4 +411,29 @@ String WiFiManagerModule::scanJson() {
     String out;
     serializeJson(doc, out);
     return out;
+}
+
+void WiFiManagerModule::setManualTime(int year, int month, int day, int hour, int minute, bool dst) {
+    struct tm t;
+    memset(&t, 0, sizeof(t));
+    t.tm_year = year - 1900;
+    t.tm_mon  = month - 1;
+    t.tm_mday = day;
+    t.tm_hour = hour + (dst ? 1 : 0);
+    t.tm_min  = minute;
+    t.tm_sec  = 0;
+
+    time_t ts = mktime(&t);
+    struct timeval now = { .tv_sec = ts, .tv_usec = 0 };
+    settimeofday(&now, nullptr);
+
+    ntpInitialSynced = true;
+
+    applyTimezoneFromConfig();
+
+    String cur = config.getCurrentTimeString();
+    config.currentTime = cur;
+    config.save();
+
+    Log(LOG_WARN, "WiFiManager: manual time set → " + cur + " (DST=" + String(dst ? "on" : "off") + ")");
 }

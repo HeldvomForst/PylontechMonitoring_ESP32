@@ -1,93 +1,117 @@
 #include "py_scheduler.h"
 #include "py_log.h"
-#include "py_parser_pwr.h" 
+#include "py_parser_pwr.h"
 
 PyScheduler py_scheduler;
 
-// ---------------------------------------------------------
-// Begin
-// ---------------------------------------------------------
+static const unsigned long LOOP_INTERVAL = 100; // 10 Hz
+
 void PyScheduler::begin(PyUart* u) {
     uart = u;
-
-    unsigned long now = millis();
-    lastPwr  = now;
-    lastBat  = now;
-    lastStat = now;
-
     queue.clear();
+
+    state = SCHED_INIT_WAIT;
+    stateStart = millis();
+
+    lastLoop = millis();
+    lastCommandFinished = millis();
+
+    lastPwr  = millis();
+    lastBat  = millis();
+    lastStat = millis();
+
+    Log(LOG_INFO, "Scheduler: started");
 }
 
-// ---------------------------------------------------------
-// Manuelles Einreihen (Console, Web-UI)
-// ---------------------------------------------------------
 void PyScheduler::enqueue(const String& cmd) {
     queue.push_back(cmd);
 }
 
-// ---------------------------------------------------------
-// Automatische Befehle erzeugen
-// ---------------------------------------------------------
+void PyScheduler::loop() {
+    unsigned long now = millis();
+
+    // 10 Hz Begrenzung
+    if (now - lastLoop < LOOP_INTERVAL) return;
+    lastLoop = now;
+
+    // Warten bis Task1 den letzten Befehl abgearbeitet hat
+    if (uart->isBusy()) return;
+
+    // -----------------------------
+    // Start-State-Machine
+    // -----------------------------
+    switch (state) {
+
+        case SCHED_INIT_WAIT:
+            if (now - stateStart >= 15000) {
+                Log(LOG_INFO, "Scheduler: initial PWR");
+                enqueue("pwr");
+                state = SCHED_SEND_PWR;
+                stateStart = now;
+            }
+            return;
+
+        case SCHED_SEND_PWR:
+            if (now - stateStart >= 15000) {
+                Log(LOG_INFO, "Scheduler: initial BAT");
+                int count = lastParsedStack.batteryCount;
+                if (count < 1) count = 1;
+                for (int i = 1; i <= count; i++)
+                    enqueue("bat " + String(i));
+                state = SCHED_SEND_BAT;
+                stateStart = now;
+            }
+            return;
+
+        case SCHED_SEND_BAT:
+            if (now - stateStart >= 30000) {
+                Log(LOG_INFO, "Scheduler: initial STAT");
+                int count = lastParsedStack.batteryCount;
+                if (count < 1) count = 1;
+                for (int i = 1; i <= count; i++)
+                    enqueue("stat " + String(i));
+                state = SCHED_NORMAL;
+                Log(LOG_INFO, "Scheduler: normal mode");
+            }
+            return;
+
+        case SCHED_NORMAL:
+            scheduleAutomatic();
+            return;
+    }
+}
+
 void PyScheduler::scheduleAutomatic() {
     unsigned long now = millis();
 
-    // --- PWR ---
-    if (config.battery.intervalPwr > 0 &&
-        now - lastPwr >= config.battery.intervalPwr) {
+    int count = lastParsedStack.batteryCount;
+    if (count < 1) count = 1;
 
+    if (now - lastPwr >= config.battery.intervalPwr) {
         enqueue("pwr");
         lastPwr = now;
     }
 
-    // Anzahl Module aus PWR-Parser
-    int moduleCount = lastParsedStack.batteryCount;
-    if (moduleCount < 1) moduleCount = 1; // Fallback
-
-    // --- BAT ---
-    if (config.battery.intervalBat > 0 &&
-        now - lastBat >= config.battery.intervalBat) {
-
-        for (int i = 1; i <= moduleCount; i++) {
+    if (now - lastBat >= config.battery.intervalBat) {
+        for (int i = 1; i <= count; i++)
             enqueue("bat " + String(i));
-        }
         lastBat = now;
     }
 
-    // --- STAT ---
-    if (config.battery.intervalStat > 0 &&
-        now - lastStat >= config.battery.intervalStat) {
-
-        for (int i = 1; i <= moduleCount; i++) {
+    if (now - lastStat >= config.battery.intervalStat) {
+        for (int i = 1; i <= count; i++)
             enqueue("stat " + String(i));
-        }
         lastStat = now;
     }
 }
 
-// ---------------------------------------------------------
-// FIFO Queue → UART senden
-// ---------------------------------------------------------
-void PyScheduler::processQueue() {
-    if (!uart) return;
-    if (millis() - lastCommandFinished < 100) {
-        return;
-    }
-
-    if (!uart->isReady()) return;
-    if (uart->isBusy()) return;
-    if (queue.empty()) return;
-
-    String cmd = queue.front();
-    queue.erase(queue.begin());
-
-    Log(LOG_INFO, "Scheduler: sending command: " + cmd);
-    uart->sendCommand(cmd.c_str());
+bool PyScheduler::hasQueuedCommand() const {
+    return !queue.empty();
 }
 
-// ---------------------------------------------------------
-// Hauptschleife
-// ---------------------------------------------------------
-void PyScheduler::loop() {
-    scheduleAutomatic();
-    processQueue();
+String PyScheduler::popNextCommand() {
+    if (queue.empty()) return "";
+    String cmd = queue.front();
+    queue.erase(queue.begin());
+    return cmd;
 }

@@ -2,6 +2,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 
+#include "nvs_flash.h"
 #include "py_systemmanager.h"
 #include "py_log.h"          // Log()
 #include "py_wifimanager.h"  // WiFi reset
@@ -119,27 +120,18 @@ void SystemManager::triggerFactoryReset() {
     // ----------------------------------------------------
     Preferences p;
 
-    const char* namespaces[] = {
-        "wifi",
-        "config",
-        "system",
-        "battery",
-        "scheduler",
-        "uart"
-    };
+    Log(LOG_WARN, "SystemManager: FULL NVS ERASE");
+    nvs_flash_erase();
+    nvs_flash_init();
+    //ESP.restart();
 
-    for (auto ns : namespaces) {
-        p.begin(ns, false);
-        p.clear();
-        p.end();
-        Log(LOG_INFO, String("SystemManager: cleared namespace '") + ns + "'");
-    }
+
 
     // ----------------------------------------------------
     // Optional: WiFi trennen
     // ----------------------------------------------------
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_AP_STA);
+    //WiFi.disconnect(true);
+    //WiFi.mode(WIFI_AP_STA);
 
     Log(LOG_WARN, "SystemManager: all data cleared → restarting...");
     delay(500);

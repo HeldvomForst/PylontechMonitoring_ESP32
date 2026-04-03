@@ -1,6 +1,16 @@
 #pragma once
 #include <Arduino.h>
 
+struct WifiStatus {
+    String mode;
+    bool connected;
+    String ssid;
+    int rssi;
+    String ip;
+    String mac;
+};
+
+
 namespace WiFiManagerModule {
 
     void begin();
@@ -13,4 +23,9 @@ namespace WiFiManagerModule {
 
     String getStatusJson();
     String scanJson();
+
+    void setManualTime(int year, int month, int day, int hour, int minute, bool dst);
+
+    WifiStatus getStatus();
+
 }
