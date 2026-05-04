@@ -71,3 +71,8 @@ It also supports an internal web interface and (optionally) OTA updates.
 ## Configuration Parameters
 
 go to the ESP Website
+
+Press boot button: 
+  * 1x short enable WIFI-AP
+  * 5x short Reset WIFI 
+  * 15s long "factory reset" 
