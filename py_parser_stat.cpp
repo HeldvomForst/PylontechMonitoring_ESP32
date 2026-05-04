@@ -1,26 +1,11 @@
 #include "py_parser_stat.h"
 #include "py_log.h"
 #include "py_uart.h"
-#include "py_mqtt.h"
-#include "config.h"
 
-// UART instance
 extern PyUart py_uart;
 
-// MQTT queue (from .ino)
-extern QueueHandle_t mqttQueue;
-extern bool statParserHasData;
-extern int  statParserModuleIndex;
-extern bool discoveryStatNeeded;
-
-// Global STAT storage (for web UI)
+// Global STAT storage (for Web UI)
 StatData lastParsedStat;
-
-// Double buffer extern
-extern ParsedData bufferA;
-extern ParsedData bufferB;
-extern volatile bool useA;
-
 
 // ---------------------------------------------------------
 // Helper: trim whitespace
@@ -63,14 +48,14 @@ ParseResult parseStatFrame(int /*moduleIndex*/,
     lastLower.trim();
     lastLower.toLowerCase();
 
-    if (!lastLower.startsWith("stat ")) {
+    if (!lastLower.startsWith("stat")) {
         Log(LOG_DEBUG, "STAT parser: ignoring frame (last command was '" + last + "')");
         return PARSE_IGNORED;
     }
 
     // Extract module index
-    int idx = lastLower.substring(5).toInt();
-    if (idx <= 0 || idx >= 16) {
+    int idx = lastLower.substring(4).toInt();
+    if (idx <= 0 || idx > 16) {
         Log(LOG_WARN, "STAT parser: invalid module index in command '" + last + "'");
         return PARSE_IGNORED;
     }
@@ -95,6 +80,9 @@ ParseResult parseStatFrame(int /*moduleIndex*/,
         Log(LOG_WARN, "STAT parser: no valid @ ... $$ frame found");
         return PARSE_FAIL;
     }
+
+    frame.replace("\r\n", "\n");
+    frame.replace("\r", "\n");
 
     // ---------------------------------------------------------
     // 4) Parse lines robustly
@@ -163,53 +151,15 @@ ParseResult parseStatFrame(int /*moduleIndex*/,
     // ---------------------------------------------------------
     lastParsedStat = out;
 
-    Log(LOG_INFO, "STAT parser: parsed " + String(out.fields.size()) +
-                " ordered fields for module " + String(idx));
+    StatBuffer* target = statUseA ? &statB : &statA;
 
-    // ---------------------------------------------------------
-    // 6) Double Buffer Write (POINTER VERSION)
-    // ---------------------------------------------------------
-    //
-    // Select the target buffer *after* the STAT frame has been fully
-    // validated and parsed. We do NOT toggle before writing, because
-    // that would expose MQTT to a partially written buffer.
-    //
-    ParsedData* target = useA ? &bufferB : &bufferA;
-
-    // Write the complete STAT structure into the selected buffer
     target->stat = out;
 
-    // -------------------------------------------------------------
-    // Toggle the active buffer ONLY AFTER the frame is fully written.
-    // This guarantees that MQTT always reads a complete, consistent
-    // snapshot and never a partially written one.
-    // -------------------------------------------------------------
-    useA = !useA;
+    statUseA = !statUseA;
 
-    // ---------------------------------------------------------
-    // 7) Send MQTT message via queue (Task 2)
-    // ---------------------------------------------------------
-    MqttMessage msg;
-    snprintf(msg.topic, sizeof(msg.topic),
-            "pylontech/stat/module%d", idx);
-    snprintf(msg.payload, sizeof(msg.payload),
-            "%u", (unsigned)out.fields.size());
-    xQueueSend(mqttQueue, &msg, 0);
 
-    // Detect new STAT field names for Home Assistant discovery
-    static std::vector<String> lastStatFieldNames;
-
-    std::vector<String> currentNames;
-    for (auto &f : out.fields) currentNames.push_back(f.name);
-
-    if (idx == 1 && !currentNames.empty() && currentNames != lastStatFieldNames) {
-        discoveryStatNeeded = true;
-        lastStatFieldNames = currentNames;
-    }
-
-    // Parser flags for MQTT
-    statParserHasData     = true;
-    statParserModuleIndex = idx;
+    Log(LOG_INFO, "STAT parser: parsed " + String(out.fields.size()) +
+                  " fields for module " + String(idx));
 
     return PARSE_OK;
 }

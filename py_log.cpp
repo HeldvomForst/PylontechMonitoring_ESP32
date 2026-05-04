@@ -7,8 +7,7 @@
 
 extern AppConfig config;
 
-bool persistentLoggingEnabled = false;
-static const int MAX_PLOG = 200;
+//static const int MAX_PLOG = 200;
 
 // ---------------------------------------------------------
 // Timestamp: YYYY.MM.DD hh:mm:ss,ms
@@ -100,38 +99,38 @@ void Log(LogLevel lvl, const String& msg) {
     // --- Serial ---
     Serial.println(line);
     // Optional persistent log
-    PersistentLog(line);
+    //PersistentLog(line);
 }
 
 static Preferences plogPrefs;
 
-void PersistentLog(const String& msg) {
-    if (!persistentLoggingEnabled) return;
+//void PersistentLog(const String& msg) {
+//    if (!persistentLoggingEnabled) return;
+//
+//    plogPrefs.begin("plog", false);
+//
+//    int count = plogPrefs.getInt("count", 0);
+//    String key = "e" + String(count % MAX_PLOG);
 
-    plogPrefs.begin("plog", false);
+//    plogPrefs.putString(key.c_str(), msg);
+//    plogPrefs.putInt("count", count + 1);
+//
+//    plogPrefs.end();
+//}
 
-    int count = plogPrefs.getInt("count", 0);
-    String key = "e" + String(count % MAX_PLOG);
+//String PersistentLogDump() {
+//    plogPrefs.begin("plog", true);
 
-    plogPrefs.putString(key.c_str(), msg);
-    plogPrefs.putInt("count", count + 1);
+//    int count = plogPrefs.getInt("count", 0);
+//    int start = max(0, count - MAX_PLOG);
 
-    plogPrefs.end();
-}
+//    String out = "";
 
-String PersistentLogDump() {
-    plogPrefs.begin("plog", true);
+//    for (int i = start; i < count; i++) {
+//        String key = "e" + String(i % MAX_PLOG);
+//        out += plogPrefs.getString(key.c_str(), "") + "\n";
+//    }
 
-    int count = plogPrefs.getInt("count", 0);
-    int start = max(0, count - MAX_PLOG);
-
-    String out = "";
-
-    for (int i = start; i < count; i++) {
-        String key = "e" + String(i % MAX_PLOG);
-        out += plogPrefs.getString(key.c_str(), "") + "\n";
-    }
-
-    plogPrefs.end();
-    return out;
-}
+//    plogPrefs.end();
+//    return out;
+//}

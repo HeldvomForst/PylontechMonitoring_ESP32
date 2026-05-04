@@ -1,0 +1,45 @@
+<div class="content">
+
+    <h2>Statistic</h2>
+
+    <div class="conn-grid-3">
+
+        <div class="conn-box">
+            <div class="conn-header">STAT Parser</div>
+            <div class="conn-body">
+                <label>
+                    <input id="enable_stat" type="checkbox">
+                </label>
+            </div>
+        </div>
+
+        <div class="conn-box">
+            <div class="conn-header">MQTT Subtopic</div>
+            <div class="conn-body">
+                <label>Topic STAT<br>
+                    <input id="topic_stat" type="text">
+                </label>
+            </div>
+        </div>
+
+        <div class="conn-box">
+            <div class="conn-header">Abfrageintervall</div>
+            <div class="conn-body">
+                <label>STAT (Sekunden)<br>
+                    <input id="interval_stat" type="number">
+                </label>
+            </div>
+        </div>
+
+    </div>
+
+    <div id="stat_groups"></div>
+	
+	<table id="stat_table"></table>
+	<br>
+	<button onclick="saveStatSettings()">Speichern</button>
+
+
+</div>
+
+<script src="/static_statistic.js"></script>

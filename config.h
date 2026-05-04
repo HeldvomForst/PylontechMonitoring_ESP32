@@ -14,11 +14,11 @@ struct TimezoneEntry {
     const char* posix;
 };
 
-extern const TimezoneEntry TIMEZONES[];
-extern const size_t TIMEZONE_COUNT;
 
 String getTimezoneJson();
 String findPosixForTimezone(const String& tzName);
+extern const TimezoneEntry TIMEZONES[];
+extern const size_t TIMEZONE_COUNT;
 
 // ---------------------------------------------------------
 // FieldConfig
@@ -45,6 +45,8 @@ struct BatteryConfig {
     bool enableStat = false;
 
     bool useFahrenheit = false;
+
+    uint8_t maxModules = 16;
 
     std::map<String, FieldConfig> fieldsPwr;
     std::map<String, FieldConfig> fieldsBat;
@@ -133,14 +135,61 @@ struct ParsedData {
     StatData stat;
 };
 
-extern ParsedData bufferA;
-extern ParsedData bufferB;
-extern volatile bool useA;
+//extern ParsedData bufferA;      //alt
+//extern ParsedData bufferB;      //alt
+//extern volatile bool useA;      //alt
+
+struct PwrBuffer {
+    BatteryStack stack;
+    std::vector<BatteryModule> modules;
+};
+
+struct BatBuffer {
+    std::vector<BatData> cells;
+};
+
+struct StatBuffer {
+    StatData stat;
+};
+
+// Doppelbuffer für PWR
+extern PwrBuffer pwrA;
+extern PwrBuffer pwrB;
+extern volatile bool pwrUseA;
+
+// Doppelbuffer für BAT
+extern BatBuffer batA;
+extern BatBuffer batB;
+extern volatile bool batUseA;
+
+// Doppelbuffer für STAT
+extern StatBuffer statA;
+extern StatBuffer statB;
+extern volatile bool statUseA;
+
 
 enum ParseResult {
     PARSE_OK,
     PARSE_FAIL,
     PARSE_IGNORED
+};
+
+#define MAX_MODULES 16
+
+enum FrameType {
+    FRAME_PWR,
+    FRAME_BAT,
+    FRAME_STAT
+};
+
+struct ParsedFrame {
+    FrameType type;
+    uint8_t index;
+
+    BatteryStack stack;
+    BatteryModule modules[MAX_MODULES];
+    BatData bat;
+    StatData stat;
 };
 
 
@@ -194,7 +243,7 @@ public:
     MqttConfig mqtt;
     BatteryConfig battery;
 
-    String firmwareVersion = "0.Beta.4";
+    String firmwareVersion = "1.0.0";
     String currentTime     = "";
     String lastPwrUpdate   = "";
     uint16_t detectedModules = 0;

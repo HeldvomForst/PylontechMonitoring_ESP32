@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <TimeLib.h>
+#include <SPIFFS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -22,28 +23,34 @@
 #include "py_uart.h"
 #include "py_scheduler.h"
 #include "py_parser_pwr.h"
+#include "py_parser_bat.h"
+#include "py_parser_stat.h"
 #include "py_log.h"
 #include "py_mqtt.h"
-#include "web/wp_log.h"
-
+//#include "py_display.h"
 
 // =========================
 //  Global Data Structures
 // =========================
 
+//PyDisplay display;
+
 // Global queue handle
 QueueHandle_t mqttQueue;
+QueueHandle_t rtWakeQueue;
 
-// Global objects
+// frameQueue kommt aus config.cpp (extern in config.h deklariert)
+extern QueueHandle_t frameQueue;
+
+// Global objectsScheduler
 PyUart py_uart;
 extern PyScheduler py_scheduler;
 extern PyMqtt py_mqtt;
 
-
 // =========================
-//  Task 1: Real‑Time Pipeline (Core 0)
-//  UART → Parser → Queue
-// =========================
+ //  Task 1: Real‑Time Pipeline (Core 0)
+ //  UART → Parser → Queue
+ // =========================
 void realtimeTask(void* parameter) {
 
     for (;;) {
@@ -86,46 +93,67 @@ void realtimeTask(void* parameter) {
             continue;
         }
 
-        // 6) Get raw frame
+        // 6) Get raw frame (Parser läuft in PyUart)
         String raw = py_uart.getFrame();
 
         // 7) Mark command finished
-        py_scheduler.lastCommandFinished = millis();
+        py_scheduler.lastCommandFinished =millis();
 
         // 8) Small delay
         vTaskDelay(1);
     }
 }
 
+// =========================
+//  Task 2: Non‑Critical Pipeline (Core 1)
+//  Scheduler + MQTT + Webserver + WiFi
+// =========================
 void noncriticalTask(void* parameter) {
     MqttMessage msg;
 
+    unsigned long lastSched = 0;
+    unsigned long lastMqtt  = 0;
+    unsigned long lastWeb   = 0;
+    unsigned long lastSys   = 0;
+    unsigned long lastRam   = 0;
+
     for (;;) {
+        unsigned long now = millis();
 
-        // Scheduler (non‑critical)
-        py_scheduler.loop();
+        // 1) Scheduler
+        if (now - lastSched >= 20) {
+            lastSched = now;
+            py_scheduler.loop();
+        }
 
-        // Process MQTT queue (Task 1 → Task 2)
+        // 2) MQTT raw queue
         while (xQueueReceive(mqttQueue, &msg, 0) == pdTRUE) {
             py_mqtt.publishRaw(msg.topic, msg.payload);
         }
 
-        // MQTT internal loop
-        py_mqtt.loop();
+        // 3) MQTT internal
+        if (now - lastMqtt >= 20) {
+            lastMqtt = now;
+            py_mqtt.loop();
+        }
 
-        // Webserver + WiFi + SystemManager
-        WebServerModule_handle();
-        WiFiManagerModule::loop();
-        SystemManager::loop();
+        // 4) Webserver
+        if (now - lastWeb >= 20) {
+            lastWeb = now;
+            WebServerModule_handle();
+        }
 
-        // RAM Debug (nur wenn Debug aktiviert)
+        // 5) WiFi + System
+        if (now - lastSys >= 20) {
+            lastSys = now;
+            WiFiManagerModule::loop();
+            SystemManager::loop();
+        }
+
+        // 6) RAM Debug
         if (config.logDebug) {
-            static unsigned long lastRamLog = 0;
-            unsigned long now = millis();
-
-            // Nur alle 5 Sekunden loggen
-            if (now - lastRamLog > 5000) {
-                lastRamLog = now;
+            if (now - lastRam >= 5000) {
+                lastRam = now;
 
                 multi_heap_info_t info;
                 heap_caps_get_info(&info, MALLOC_CAP_DEFAULT);
@@ -137,11 +165,15 @@ void noncriticalTask(void* parameter) {
                     " alloc=" + info.total_allocated_bytes
                 );
             }
+        
+        //display.loop();
+        
         }
 
         vTaskDelay(1);
     }
 }
+
 
 // =========================
 //  Setup
@@ -152,7 +184,7 @@ void setup() {
 
     Log(LOG_INFO, "System booting...");
 
-    // Load configuration
+    // Load configuration (deine bestehende load() kümmert sich um alles)
     config.load();
 
     // Create MQTT queue
@@ -166,8 +198,8 @@ void setup() {
     }
 
     // UART + Scheduler
-    py_uart.begin(16, 17);
-    py_scheduler.begin(&py_uart);
+    py_uart.begin(16, 17);      // RX=16, TX=17
+    py_scheduler.begin(&py_uart);  
 
     // Initial command
     py_scheduler.enqueue("pwr");
@@ -182,6 +214,14 @@ void setup() {
     // MQTT
     py_mqtt.begin();
 
+    // SPIFFS
+    if (!SPIFFS.begin(false)) {
+        Log(LOG_WARN, "SPIFFS mount failed, formatting...");
+        SPIFFS.begin(true);
+    } else {
+        Log(LOG_INFO, "SPIFFS mounted");
+    }
+
     // Webserver
     WebServerModule_begin();
 
@@ -194,8 +234,9 @@ void setup() {
         }
         return String("UNKNOWN");
     });
+    //display.begin();
 
-    // Start Task 1 (Real‑Time) on Core 0
+    // Start Task 1 (Real‑Time) on Core 1
     xTaskCreatePinnedToCore(
         realtimeTask,
         "RealTime Task",
@@ -203,10 +244,10 @@ void setup() {
         NULL,
         2,          // higher priority
         NULL,
-        0           // Core 0
+        1           // Core 1
     );
 
-    // Start Task 2 (Non‑Critical) on Core 1
+    // Start Task 2 (Non‑Critical + OTA + Webserver) auf Core 0
     xTaskCreatePinnedToCore(
         noncriticalTask,
         "NonCritical Task",
@@ -214,12 +255,11 @@ void setup() {
         NULL,
         1,          // normal priority
         NULL,
-        1           // Core 1
+        0           // Core 0
     );
 
     Log(LOG_INFO, "Setup complete");
 }
-
 
 // =========================
 //  Arduino Loop (unused)

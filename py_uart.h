@@ -1,42 +1,29 @@
 #pragma once
 #include <Arduino.h>
 
-// ---------------------------------------------------------
-// PyUart
-// Handles all communication with the Pylontech battery.
-// This class is intentionally synchronous and blocking,
-// because the battery protocol requires strict timing,
-// wake‑up sequences, and sequential command/response flow.
-//
-// IMPORTANT:
-// - This class must run ONLY inside the real‑time task (Core 0).
-// - No other task may access Serial2.
-// - Parser is executed AFTER a complete frame is received.
-// - Last PWR/BAT/STAT frames are stored for the website.
-// ---------------------------------------------------------
 class PyUart {
 public:
     void begin(int rx, int tx);
-    void loop();   // intentionally empty (legacy compatibility)
+    void loop();   // intentionally empty
 
-    // Send command and receive full frame (blocking)
+    // Blocking command → fills lastRawFrame
     bool sendCommand(const char* cmd);
 
-    // Frame access
-    bool hasFrame() const;
-    bool isFrameValid() const;
-    String getFrame();
-    String getLastCommand() const;
+    // Frame access for realtimeTask()
+    bool hasFrame() const { return frameReady; }
+    bool isFrameValid() const { return frameValid; }
+    String getFrame();   // returns lastRawFrame and clears frameReady
 
-    // Last known frames for website
+    // Status
+    bool isReady() const { return commReady; }
+    bool isBusy() const { return busy; }
+    String getLastCommand() const { return lastCommand; }
+
+    // Last frames for web UI
     String getLastPwrFrame() const { return lastPwrFrame; }
     String getLastBatFrame() const { return lastBatFrame; }
     String getLastStatFrame() const { return lastStatFrame; }
     String getLastRawFrame() const { return lastRawFrame; }
-
-    // Status
-    bool isReady() const;
-    bool isBusy() const;
 
 private:
     void switchBaud(int newRate);
@@ -55,7 +42,6 @@ private:
     String lastCommand;
     String lastRawFrame;
 
-    // NEW: store last frames for website
     String lastPwrFrame;
     String lastBatFrame;
     String lastStatFrame;

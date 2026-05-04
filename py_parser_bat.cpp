@@ -1,26 +1,12 @@
 #include "py_parser_bat.h"
 #include "py_log.h"
 #include "py_uart.h"
-#include "py_mqtt.h"
-#include "py_scheduler.h"
-#include "config.h"
 
 extern PyUart py_uart;
-extern QueueHandle_t mqttQueue;
 
-extern bool batParserHasData;
-extern int  batParserModuleIndex;
-extern bool discoveryBatNeeded;
-
-// Global BAT storage (for web UI)
-BatData lastParsedBat;
+// Globale BAT-Daten (für Web-UI)
 std::vector<BatData> lastParsedBatCells;
-
-// Double buffer extern
-extern ParsedData bufferA;
-extern ParsedData bufferB;
-extern volatile bool useA;
-
+BatData lastParsedBat;
 
 // ---------------------------------------------------------
 // Helper: trim whitespace
@@ -88,9 +74,9 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
                           const String& raw,
                           BatData& out)
 {
+    lastParsedBatCells.clear();
     out.fields.clear();
     out.cellIndex = -1;
-    lastParsedBatCells.clear();
 
     // ---------------------------------------------------------
     // 1) Check if this frame belongs to BAT
@@ -109,19 +95,13 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
     String num = lastLower.substring(3);
     num.trim();
     int moduleIdx = num.toInt();
+
     if (moduleIdx < 1 || moduleIdx > 16) {
         Log(LOG_WARN, "BAT parser: invalid module index '" + last + "'");
         return PARSE_IGNORED;
     }
 
-    // Assign module index to the output structure
     out.moduleIndex = moduleIdx;
-
-
-    if (moduleIdx < 1 || moduleIdx > 16) {
-        Log(LOG_WARN, "BAT parser: invalid module index '" + last + "'");
-        return PARSE_IGNORED;
-    }
 
     // ---------------------------------------------------------
     // 2) Validate frame
@@ -184,7 +164,7 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
     for (int row = 1; row < (int)lines.size(); row++) {
         String line = lines[row];
 
-        // Stop at non‑numeric first token
+        // Stop at non-numeric first token
         String firstToken = line;
         firstToken.trim();
         int spacePos = firstToken.indexOf(' ');
@@ -223,46 +203,17 @@ ParseResult parseBatFrame(int /*moduleIndex*/,
     if (!lastParsedBatCells.empty()) {
         out = lastParsedBatCells[0];
         lastParsedBat = out;
-
     }
+
+    BatBuffer* target = batUseA ? &batB : &batA;
+
+    target->cells = lastParsedBatCells;
+
+    batUseA = !batUseA;
+
 
     Log(LOG_INFO, "BAT parser: parsed " + String(lastParsedBatCells.size()) +
-                " cells for module " + String(moduleIdx));
-
-    // ---------------------------------------------------------
-    // 8) Double Buffer Write (POINTER VERSION)
-    // ---------------------------------------------------------
-    //
-    // Select the target buffer *after* the BAT frame has been fully
-    // validated and parsed. We do NOT toggle before writing, because
-    // that would expose MQTT to a partially written buffer.
-    //
-    ParsedData* target = useA ? &bufferB : &bufferA;
-
-    // Write the complete BAT cell list into the selected buffer
-    target->batCells = lastParsedBatCells;
-
-    // -------------------------------------------------------------
-    // Toggle the active buffer ONLY AFTER the frame is fully written.
-    // This guarantees that MQTT always reads a complete, consistent
-    // snapshot and never a partially written one.
-    // -------------------------------------------------------------
-    useA = !useA;
-
-    // Parser flags for MQTT
-    batParserHasData = true;
-    batParserModuleIndex = moduleIdx;
-
-    // Detect new BAT fields (for Home Assistant discovery)
-    static size_t lastBatFieldCount = 0;
-    size_t currentFieldCount =
-        lastParsedBatCells.empty() ? 0 : lastParsedBatCells[0].fields.size();
-
-    if (currentFieldCount != lastBatFieldCount) {
-        discoveryBatNeeded = true;
-    }
-    lastBatFieldCount = currentFieldCount;
+                  " cells for module " + String(moduleIdx));
 
     return PARSE_OK;
-
 }

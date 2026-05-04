@@ -1,0 +1,67 @@
+<div class="content">
+
+<h2>Celldata</h2>
+
+<div class="conn-grid-3">
+
+    <div class="conn-box">
+        <div class="conn-header">BAT Parser</div>
+        <div class="conn-body">
+            <label>
+                <input id="enable_bat" type="checkbox">
+                Aktivieren
+            </label>
+        </div>
+    </div>
+
+    <div class="conn-box">
+        <div class="conn-header">MQTT Subtopics</div>
+        <div class="conn-body">
+            <label>Topic BAT<br>
+            <input id="topic_bat" type="text">
+            </label>
+            <br><br>
+            <label>Cell Prefix<br>
+            <input id="cell_prefix" type="text">
+            </label>
+        </div>
+    </div>
+
+    <div class="conn-box">
+        <div class="conn-header">Abfrageintervall</div>
+        <div class="conn-body">
+            <label>BAT (Sekunden)<br>
+            <input id="interval_bat" type="number">
+            </label>
+        </div>
+    </div>
+
+</div>
+
+<!-- 🔥 HIER KOMMT DIE TABELLE -->
+<div class="conn-box">
+    <div class="conn-header">Zellwerte</div>
+    <div class="conn-body">
+
+        <table class="conn-table">
+            <thead>
+                <tr>
+                    <th>Feldname</th>
+                    <th>Anzeigename</th>
+                    <th>Rohdaten</th>
+                    <th>Faktor</th>
+                    <th>Einheit</th>
+                    <th>MQTT</th>
+                    <th>Send</th>
+                </tr>
+            </thead>
+            <tbody id="bat_table"></tbody>
+        </table>
+
+        <button onclick="batSave()">Speichern</button>
+    </div>
+</div>
+
+</div>
+
+<script src="/static_celldata.js"></script>

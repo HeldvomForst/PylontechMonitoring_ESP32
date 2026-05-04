@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Pylontech Dashboard</title>
+    <link rel="stylesheet" href="/static_style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+
+<body>
+
+<header class="topbar">
+    <button class="burger" onclick="toggleSidebar()">☰</button>
+    <div class="title-with-icons">
+        <img src="/Batterie.png" class="logo-icon">
+        <h1>Pylontech Monitor</h1>
+        <img src="/Batterie.png" class="logo-icon">
+    </div>
+</header>
+
+<aside id="sidebar" class="sidebar">
+	<nav>
+		<a href="#" onclick="loadPage('pages_dashboard'); return false;">Dashboard</a>
+		<a href="#" onclick="loadPage('pages_basevalue'); return false;">Basevalue</a>
+		<a href="#" onclick="loadPage('pages_celldata'); return false;">Celldata</a>
+		<a href="#" onclick="loadPage('pages_statistic'); return false;">Statistic</a>
+		<a href="#" onclick="loadPage('pages_console'); return false;">Battery Console</a>
+		<a href="#" onclick="loadPage('pages_connection'); return false;">Connection</a>
+		<a href="#" onclick="loadPage('pages_log'); return false;">Log</a>
+		<a href="/filemanager">Filemanager</a>
+	</nav>
+
+</aside>
+
+<main id="content">
+    <!-- Inhalt wird dynamisch geladen -->
+</main>
+
+<script>
+function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+}
+
+function loadPage(url) {
+    fetch(url + ".html")
+    .then(r => r.text())
+    .then(html => {
+        const content = document.getElementById("content");
+        content.innerHTML = html;
+
+        // Alle Skripte im geladenen HTML finden
+        const scripts = content.querySelectorAll("script");
+
+        scripts.forEach(oldScript => {
+            const newScript = document.createElement("script");
+
+            if (oldScript.src) {
+                // Externes Script neu laden
+                newScript.src = oldScript.src;
+
+                // WICHTIG: warten bis Script geladen ist
+                newScript.onload = () => {
+                    if (url.includes("connection")) {
+                        initConnectionPage();
+                    }
+                };
+
+            } else {
+                // Inline-Script übernehmen
+                newScript.textContent = oldScript.textContent;
+
+                // Inline-Scripts sofort ausführen
+                if (url.includes("connection")) {
+                    setTimeout(() => initConnectionPage(), 10);
+                }
+            }
+
+            document.body.appendChild(newScript);
+        });
+
+        // Falls die Seite KEINE Scripts enthält (z.B. Connection-Seite ohne <script>)
+        if (scripts.length === 0 && url.includes("connection")) {
+            initConnectionPage();
+        }
+    })
+    .catch(err => {
+        document.getElementById("content").innerHTML =
+            "Fehler beim Laden: " + err.message;
+    });
+}
+
+
+// Startseite automatisch laden
+window.addEventListener("DOMContentLoaded", () => {
+    loadPage("pages_dashboard");
+});
+</script>
+
+</body>
+</html>

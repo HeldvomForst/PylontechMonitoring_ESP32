@@ -3,9 +3,12 @@ All notable changes to this project will be documented in this file.
 
 ## ToDo
 
-- more stable Website
 - other Homeautomation (Discoverer)
 - Display? 
+
+## 2026-05-03 
+- more stable Website
+
 
 ## 2026-04-03 
 - Stable communikation to battery

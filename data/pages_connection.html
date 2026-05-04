@@ -1,0 +1,172 @@
+<h2>Connection</h2>
+
+<!-- WIFI ------------------------------------------------------------ -->
+<div class="conn-box wifi-box">
+    <div class="conn-header wifi-header">WiFi</div>
+    <div class="conn-body">
+
+        <div id="wifi_status">Loading WiFi status…</div>
+
+        <button onclick="wifiScan()">Scan</button>
+
+        <div id="wifi_scanlist"></div>
+
+        <label><input type="checkbox" id="wifi_manual" onchange="wifiToggleManual()"> manuel mode</label>
+
+        <div id="wifi_manual_box" style="display:none;">
+            <table>
+                <tr><td>SSID:</td><td><input id="wifi_ssid" type="text"></td></tr>
+                <tr><td>Passwort:</td><td><input id="wifi_pass" type="password"></td></tr>
+                <tr><td></td><td><button onclick="wifiConnect()">Connect</button></td></tr>
+            </table>
+        </div>
+
+        <div id="wifi_msg" class="msg"></div>
+    </div>
+</div>
+
+
+<!-- MQTT ------------------------------------------------------------ -->
+<div class="conn-box mqtt-box">
+    <div class="conn-header mqtt-header">MQTT</div>
+    <div class="conn-body">
+
+        <table class="conn-table">
+            <tr>
+                <td>Enabled:</td>
+                <td><input type="checkbox" id="mqtt_enabled"></td>
+            </tr>
+
+            <tr>
+                <td>Server:</td>
+                <td><input type="text" id="mqtt_server"></td>
+            </tr>
+
+            <tr>
+                <td>Port:</td>
+                <td><input type="number" id="mqtt_port"></td>
+            </tr>
+
+            <tr>
+                <td>User:</td>
+                <td><input type="text" id="mqtt_user"></td>
+            </tr>
+
+            <tr>
+                <td>Password:</td>
+                <td><input type="password" id="mqtt_pass"></td>
+            </tr>
+
+            <tr>
+                <td>Topic prefix:</td>
+                <td><input type="text" id="mqtt_topic"></td>
+            </tr>
+
+            <tr>
+                <td></td>
+                <td><button class="btn-save" onclick="mqttSave()">Save</button></td>
+            </tr>
+        </table>
+
+        <div id="mqtt_msg" class="msg"></div>
+    </div>
+</div>
+
+
+<!-- NTP / TIME ------------------------------------------------------ -->
+<div class="conn-box ntp-box">
+    <div class="conn-header ntp-header">NTP / Time</div>
+    <div class="conn-body">
+
+        <!-- 3 Modi -->
+        <label><input type="checkbox" id="ntp_gateway" onchange="ntpModeSelect('gateway')"> Use gateway NTP</label><br>
+        <label><input type="checkbox" id="ntp_manual" onchange="ntpModeSelect('manual')"> Manual NTP server</label><br>
+        <label><input type="checkbox" id="time_manual" onchange="ntpModeSelect('time')"> Manual time</label>
+
+        <!-- Manual NTP -->
+        <div id="ntp_manual_box" style="display:none; margin-top:10px;">
+            <table class="conn-table">
+                <tr>
+                    <td>NTP Server:</td>
+                    <td><input type="text" id="ntp_server" value="pool.ntp.org"></td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Manual Time -->
+        <div id="time_manual_box" style="display:none; margin-top:10px;">
+            <table class="conn-table">
+                <tr><td>Date:</td><td><input type="date" id="time_date"></td></tr>
+                <tr><td>Time:</td><td><input type="time" id="time_time"></td></tr>
+                <tr><td>DST:</td><td><input type="checkbox" id="time_dst"></td></tr>
+            </table>
+        </div>
+
+        <!-- Timezone -->
+        <h4>Timezone</h4>
+        <table class="conn-table">
+            <tr>
+                <td>Region:</td>
+                <td><select id="tz_region"></select></td>
+            </tr>
+            <tr>
+                <td>City:</td>
+                <td><select id="tz_city"></select></td>
+            </tr>
+        </table>
+
+        <!-- Hidden full timezone -->
+        <input type="hidden" id="tz_full">
+
+        <!-- Save -->
+        <button class="btn-save" onclick="timeSave()">Save</button>
+        <div id="time_msg" class="msg"></div>
+        
+		<!-- Aktueller Server -->
+        <h4>Server</h4>
+        <div id="ntp_current">–</div>
+
+    </div>
+</div>
+
+
+
+<!-- IP CONFIG ------------------------------------------------------- -->
+<div class="conn-box ip-box">
+    <div class="conn-header ip-header">IP Configuration</div>
+    <div class="conn-body">
+
+        <label>
+            <input type="checkbox" id="ip_dhcp" onchange="ipToggleDhcp()">
+            DHCP
+        </label>
+
+        <div id="ip_static_box" style="display:none; margin-top:10px;">
+            <table class="conn-table">
+                <tr>
+                    <td>IP Address:</td>
+                    <td><input type="text" id="ip_addr"></td>
+                </tr>
+                <tr>
+                    <td>Subnet Mask:</td>
+                    <td><input type="text" id="ip_mask"></td>
+                </tr>
+                <tr>
+                    <td>Gateway:</td>
+                    <td><input type="text" id="ip_gw"></td>
+                </tr>
+                <tr>
+                    <td>DNS:</td>
+                    <td><input type="text" id="ip_dns"></td>
+                </tr>
+            </table>
+        </div>
+
+        <button class="btn-save" onclick="ipSave()">Save</button>
+        <div id="ip_msg" class="msg"></div>
+
+    </div>
+</div>
+
+
+<script src="/static_connection.js"></script>

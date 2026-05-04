@@ -1,0 +1,35 @@
+<h2>Dashboard</h2>
+
+<div class="dashboard-grid">
+
+    <div class="card" id="wifiCard">
+        <h2>WiFi</h2>
+        <p><b>Mode:</b> <span id="wifi_mode"></span></p>
+        <p><b>SSID:</b> <span id="wifi_ssid"></span></p>
+        <p><b>IP:</b> <span id="wifi_ip"></span></p>
+        <p><b>RSSI:</b> <span id="wifi_rssi"></span> dBm</p>
+    </div>
+
+    <div class="card" id="mqttCard">
+        <h2>MQTT</h2>
+        <p><b>Status:</b> <span id="mqtt_status"></span></p>
+        <p><b>Server:</b> <span id="mqtt_server"></span></p>
+        <p><b>Last contact:</b> <span id="mqtt_last"></span></p>
+    </div>
+
+    <div class="card" id="batteryCard">
+        <h2>Batterie</h2>
+        <p><b>Detected modules:</b> <span id="bat_modules"></span></p>
+        <p><b>Last update:</b> <span id="bat_last"></span></p>
+    </div>
+
+    <div class="card" id="systemCard">
+        <h2>System</h2>
+        <p><b>Time:</b> <span id="sys_time"></span></p>
+        <p><b>Uptime:</b> <span id="sys_uptime"></span></p>
+        <p><b>Firmware:</b> <span id="sys_fw"></span></p>
+    </div>
+
+</div>
+
+<script src="/static_dashboard.js"></script>

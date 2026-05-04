@@ -1,0 +1,28 @@
+<h2>Log</h2>
+
+<!-- Oberes Logfenster -->
+<div class="log-box">
+    <pre id="logbox">loading...</pre>
+</div>
+
+<!-- Reload Button -->
+<div class="box" style="margin-top: 10px;">
+    <button onclick="loadLog()">Reload</button>
+</div>
+
+<!-- Log Level Auswahl -->
+<div class="box" style="margin-top: 10px;">
+    <h3>Log Level Filter</h3>
+
+    <label><input type="checkbox" id="log_info"> Info</label>
+    <label><input type="checkbox" id="log_warn"> Warn</label>
+    <label><input type="checkbox" id="log_error"> Error</label>
+    <label><input type="checkbox" id="log_debug"> Debug</label>
+
+    <button onclick="saveLogLevel()">Save</button>
+
+    <!-- Rückmeldung nach Save -->
+    <pre id="logmsg"></pre>
+</div>
+
+<script src="/static_log.js"></script>

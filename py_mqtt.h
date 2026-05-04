@@ -100,7 +100,11 @@ private:
     void publishDiscoveryStatField(int moduleIndex, const StatField& f);
 
     // Discovery state machine
-    void handleDiscoveryStep(const ParsedData& localCopy);
+    void handleDiscoveryStep(
+        const PwrBuffer& pwr,
+        const BatBuffer& bat,
+        const StatBuffer& stat
+    );
 
     // Logging helper
     void logPublishFailure(const String& topic);

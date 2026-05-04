@@ -1,87 +1,13 @@
 #include "config.h"
 #include "py_log.h"
 #include <ArduinoJson.h>
+#include <FS.h>
+#include <SPIFFS.h>
 
 
 
 AppConfig config;
 
-// ---------------------------------------------------------
-// Central timezone list (compact, grouped by region)
-// ---------------------------------------------------------
-const TimezoneEntry TIMEZONES[] = {
-    // Europe
-    {"Europe", "London",   "Europe/London",   "GMT0BST-1,M3.5.0/01:00:00,M10.5.0/02:00:00"},
-    {"Europe", "Berlin",   "Europe/Berlin",   "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00"},
-    {"Europe", "Paris",    "Europe/Paris",    "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00"},
-    {"Europe", "Rome",     "Europe/Rome",     "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00"},
-    {"Europe", "Madrid",   "Europe/Madrid",   "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00"},
-    {"Europe", "Vienna",   "Europe/Vienna",   "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00"},
-    {"Europe", "Athens",   "Europe/Athens",   "EET-2EEST-3,M3.5.0/03:00:00,M10.5.0/04:00:00"},
-    {"Europe", "Moscow",   "Europe/Moscow",   "MSK-3"},
-
-    // America
-    {"America", "New York","America/New_York","EST+5EDT+4,M3.2.0/02:00:00,M11.1.0/02:00:00"},
-    {"America", "Chicago", "America/Chicago", "CST+6CDT+5,M3.2.0/02:00:00,M11.1.0/02:00:00"},
-    {"America", "Denver",  "America/Denver",  "MST+7MDT+6,M3.2.0/02:00:00,M11.1.0/02:00:00"},
-    {"America", "Los Angeles","America/Los_Angeles","PST+8PDT+7,M3.2.0/02:00:00,M11.1.0/02:00:00"},
-    {"America", "Anchorage","America/Anchorage","AKST+9AKDT+8,M3.2.0/02:00:00,M11.1.0/02:00:00"},
-    {"Pacific", "Honolulu","Pacific/Honolulu","HST+10"},
-
-    // South America
-    {"America", "Sao Paulo","America/Sao_Paulo","BRT+3"},
-    {"America", "Buenos Aires","America/Argentina/Buenos_Aires","ART+3"},
-    {"America", "Santiago","America/Santiago","CLT+4CLST+3,M9.1.6/24:00:00,M4.1.6/24:00:00"},
-
-    // Australia / NZ
-    {"Australia","Sydney", "Australia/Sydney","AEST-10AEDT-11,M10.1.0/02:00:00,M4.1.0/03:00:00"},
-    {"Australia","Melbourne","Australia/Melbourne","AEST-10AEDT-11,M10.1.0/02:00:00,M4.1.0/03:00:00"},
-    {"Pacific", "Auckland","Pacific/Auckland","NZST-12NZDT-13,M9.5.0/02:00:00,M4.1.0/03:00:00"},
-
-    // Asia
-    {"Asia", "Dubai",      "Asia/Dubai",      "GST-4"},
-    {"Asia", "Karachi",    "Asia/Karachi",    "PKT-5"},
-    {"Asia", "Dhaka",      "Asia/Dhaka",      "BDT-6"},
-    {"Asia", "Bangkok",    "Asia/Bangkok",    "ICT-7"},
-    {"Asia", "Singapore",  "Asia/Singapore",  "SGT-8"},
-    {"Asia", "Shanghai",   "Asia/Shanghai",   "CST-8"},
-    {"Asia", "Tokyo",      "Asia/Tokyo",      "JST-9"},
-    {"Asia", "Seoul",      "Asia/Seoul",      "KST-9"},
-
-    // Africa
-    {"Africa", "Johannesburg","Africa/Johannesburg","SAST-2"},
-    {"Africa", "Cairo",       "Africa/Cairo",      "EET-2"},
-    {"Africa", "Nairobi",     "Africa/Nairobi",    "EAT-3"},
-
-    // GMT Offsets
-    {"GMT", "GMT-12", "Etc/GMT+12", "GMT+12"},
-    {"GMT", "GMT-11", "Etc/GMT+11", "GMT+11"},
-    {"GMT", "GMT-10", "Etc/GMT+10", "GMT+10"},
-    {"GMT", "GMT-9",  "Etc/GMT+9",  "GMT+9"},
-    {"GMT", "GMT-8",  "Etc/GMT+8",  "GMT+8"},
-    {"GMT", "GMT-7",  "Etc/GMT+7",  "GMT+7"},
-    {"GMT", "GMT-6",  "Etc/GMT+6",  "GMT+6"},
-    {"GMT", "GMT-5",  "Etc/GMT+5",  "GMT+5"},
-    {"GMT", "GMT-4",  "Etc/GMT+4",  "GMT+4"},
-    {"GMT", "GMT-3",  "Etc/GMT+3",  "GMT+3"},
-    {"GMT", "GMT-2",  "Etc/GMT+2",  "GMT+2"},
-    {"GMT", "GMT-1",  "Etc/GMT+1",  "GMT+1"},
-    {"GMT", "GMT+0",  "Etc/GMT",    "GMT0"},
-    {"GMT", "GMT+1",  "Etc/GMT-1",  "GMT-1"},
-    {"GMT", "GMT+2",  "Etc/GMT-2",  "GMT-2"},
-    {"GMT", "GMT+3",  "Etc/GMT-3",  "GMT-3"},
-    {"GMT", "GMT+4",  "Etc/GMT-4",  "GMT-4"},
-    {"GMT", "GMT+5",  "Etc/GMT-5",  "GMT-5"},
-    {"GMT", "GMT+6",  "Etc/GMT-6",  "GMT-6"},
-    {"GMT", "GMT+7",  "Etc/GMT-7",  "GMT-7"},
-    {"GMT", "GMT+8",  "Etc/GMT-8",  "GMT-8"},
-    {"GMT", "GMT+9",  "Etc/GMT-9",  "GMT-9"},
-    {"GMT", "GMT+10", "Etc/GMT-10", "GMT-10"},
-    {"GMT", "GMT+11", "Etc/GMT-11", "GMT-11"},
-    {"GMT", "GMT+12", "Etc/GMT-12", "GMT-12"}
-};
-
-const size_t TIMEZONE_COUNT = sizeof(TIMEZONES) / sizeof(TIMEZONES[0]);
 
 static const size_t CHUNK_SIZE = 1500;
 
@@ -282,7 +208,7 @@ void AppConfig::factoryDefaults() {
     battery.fieldsBat.clear();
     battery.fieldsStat.clear();
 
-    firmwareVersion = "0.RC.1";
+    firmwareVersion = "1.0.0";
     currentTime     = "";
     lastPwrUpdate   = "";
     detectedModules = 0;
@@ -755,48 +681,37 @@ void AppConfig::save() {
     saveStatFields();
 }
 
-String getTimezoneJson() {
-    DynamicJsonDocument doc(4096);
-
-    // Wir erzeugen Arrays nur einmal pro Region
-    std::map<String, JsonArray> regionArrays;
-
-    for (size_t i = 0; i < TIMEZONE_COUNT; i++) {
-        const TimezoneEntry& tz = TIMEZONES[i];
-
-        // Falls Region noch nicht existiert → Array anlegen
-        if (!regionArrays.count(tz.region)) {
-            regionArrays[tz.region] = doc.createNestedArray(tz.region);
-        }
-
-        JsonArray arr = regionArrays[tz.region];
-
-        JsonObject o = arr.createNestedObject();
-        o["city"] = tz.city;
-        o["tz"]   = tz.tzName;
-    }
-
-    String out;
-    serializeJson(doc, out);
-    return out;
-}
 
 String findPosixForTimezone(const String& tzName) {
-    const char* target = tzName.c_str();
 
-    for (size_t i = 0; i < TIMEZONE_COUNT; i++) {
-        // Direkter Vergleich ohne String-Objekte
-        if (strcmp(target, TIMEZONES[i].tzName) == 0) {
-            return TIMEZONES[i].posix;
+    File f = SPIFFS.open("/timezone.json", "r");
+    if (!f) {
+        Serial.println("ERROR: timezone.json not found");
+        return "UTC0";
+    }
+
+    DynamicJsonDocument doc(20000);
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+
+    if (err) {
+        Serial.println("ERROR: timezone.json parse failed");
+        return "UTC0";
+    }
+
+    // Durch alle Regionen iterieren
+    for (JsonPair region : doc.as<JsonObject>()) {
+        JsonArray arr = region.value().as<JsonArray>();
+
+        for (JsonObject entry : arr) {
+            if (entry["tz"].as<String>() == tzName) {
+                return entry["posix"].as<String>();
+            }
         }
     }
 
-    // Fallback
-    return "UTC0";
+    return "UTC0"; // fallback
 }
-
-
-
 
 // ----------------------------------------------------
 //  Uptime helper
@@ -814,3 +729,46 @@ String AppConfig::uptimeString() {
 
     return String(buf);
 }
+
+// Buffer
+
+PwrBuffer pwrA;
+PwrBuffer pwrB;
+volatile bool pwrUseA = true;
+
+BatBuffer batA;
+BatBuffer batB;
+volatile bool batUseA = true;
+
+StatBuffer statA;
+StatBuffer statB;
+volatile bool statUseA = true;
+
+//unten alt 
+
+//void applyParsedFrame(const ParsedFrame& f) {
+//
+//    ParsedData* target = useA ? &bufferB : &bufferA;
+//
+//    if (f.type == FRAME_PWR) {
+//        target->stack = f.stack;
+//        target->modules.clear();
+//        for (int i = 0; i < MAX_MODULES; i++) {
+//            if (f.modules[i].present)
+//                target->modules.push_back(f.modules[i]);
+//        }
+//    }
+//    else if (f.type == FRAME_BAT) {
+//        if (f.index < target->batCells.size())
+//            target->batCells[f.index] = f.bat;
+//        else {
+//            target->batCells.resize(f.index + 1);
+//            target->batCells[f.index] = f.bat;
+//        }
+//    }
+//    else if (f.type == FRAME_STAT) {
+//        target->stat = f.stat;
+//    }
+//
+//    useA = !useA;
+//}

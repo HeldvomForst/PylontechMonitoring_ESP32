@@ -2,7 +2,6 @@
 #include "py_log.h"
 #include "config.h"
 #include "py_uart.h"
-#include "py_mqtt.h"
 
 #include <cctype>
 #include <algorithm>
@@ -10,27 +9,11 @@
 // UART instance
 extern PyUart py_uart;
 
-// MQTT queue (from .ino)
-extern QueueHandle_t mqttQueue;
-extern bool parserHasData;
-extern bool newParserData;
-extern bool discoveryPwrNeeded;
-extern bool discoveryBatNeeded;
-extern bool discoveryStatNeeded;
-
-// Global parser data for web interface
-std::vector<String> lastParserHeader;
-std::vector<String> lastParserValues;
-
-// Global parser results
+// Globale Parserdaten für Weboberfläche
 BatteryStack lastParsedStack;
 std::vector<BatteryModule> lastParsedModules;
-
-// Double buffer extern
-extern ParsedData bufferA;
-extern ParsedData bufferB;
-extern volatile bool useA;
-
+std::vector<String> lastParserHeader;
+std::vector<String> lastParserValues;
 
 // ---------------------------------------------------------
 // Helper: trim whitespace
@@ -82,11 +65,13 @@ ParseResult parsePwrFrame(const String& raw,
                           BatteryStack& stackOut,
                           std::vector<BatteryModule>& modulesOut)
 {
+    // Sicherstellen, dass das wirklich ein PWR-Frame ist
     if (py_uart.getLastCommand() != "pwr") {
         Log(LOG_DEBUG, "PWR parser: ignoring frame (last command was '" + py_uart.getLastCommand() + "')");
         return PARSE_IGNORED;
     }
 
+    // Nur gültige Frames verarbeiten
     if (!py_uart.isFrameValid()) {
         Log(LOG_WARN, "PWR parser: skipping invalid frame");
         return PARSE_FAIL;
@@ -97,12 +82,14 @@ ParseResult parsePwrFrame(const String& raw,
 
     Log(LOG_INFO, "PWR parser: raw frame received, length=" + String(raw.length()));
 
+    // @ ... $$ extrahieren
     String frame;
     if (!extractFrame(raw, frame)) {
         Log(LOG_WARN, "PWR parser: no valid @ ... $$ frame found");
         return PARSE_FAIL;
     }
 
+    // Zeilen aufsplitten
     std::vector<String> lines;
     {
         int pos = 0;
@@ -124,6 +111,7 @@ ParseResult parsePwrFrame(const String& raw,
         return PARSE_FAIL;
     }
 
+    // Header parsen
     std::vector<String> header = splitWS(lines[0]);
     if (header.size() < 3) {
         Log(LOG_WARN, "PWR parser: header too small");
@@ -134,26 +122,25 @@ ParseResult parsePwrFrame(const String& raw,
     lastParserValues.clear();
 
     int baseIndex = -1;
+    int timeIndex = -1;
+
     for (size_t h = 0; h < header.size(); h++) {
         if (header[h] == "Base.St" || header[h] == "Base") {
             baseIndex = h;
-            break;
+        }
+        if (header[h] == "Time") {
+            timeIndex = h;
         }
     }
 
+    // Datenzeilen
     for (size_t i = 1; i < lines.size(); i++) {
 
         std::vector<String> cols = splitWS(lines[i]);
+        if (cols.empty()) continue;
 
-        int timeIndex = -1;
-        for (size_t h = 0; h < header.size(); h++) {
-            if (header[h] == "Time") {
-                timeIndex = h;
-                break;
-            }
-        }
-
-        if (timeIndex >= 0 && cols.size() > timeIndex + 1) {
+        // Datum + Zeit zusammenführen, falls getrennt
+        if (timeIndex >= 0 && cols.size() > (size_t)timeIndex + 1) {
             String datePart = cols[timeIndex];
             String timePart = cols[timeIndex + 1];
 
@@ -168,11 +155,13 @@ ParseResult parsePwrFrame(const String& raw,
 
         if (cols.size() < header.size()) continue;
 
+        // Absent → Ende
         if (baseIndex >= 0 && cols[baseIndex] == "Absent") {
             Log(LOG_INFO, "PWR parser: Absent detected at line " + String(i));
             break;
         }
 
+        // Erste gültige Zeile für Web-UI merken
         if (lastParserValues.empty()) {
             lastParserValues = cols;
         }
@@ -205,6 +194,7 @@ ParseResult parsePwrFrame(const String& raw,
             }
         }
 
+        // Plausibilitätscheck
         bool plausible = true;
 
         plausible &= (mod.index >= 1 && mod.index <= 32);
@@ -225,6 +215,7 @@ ParseResult parsePwrFrame(const String& raw,
         return PARSE_FAIL;
     }
 
+    // Stack-Werte berechnen
     int count = modulesOut.size();
     stackOut.batteryCount = count;
     config.detectedModules = count;
@@ -249,33 +240,19 @@ ParseResult parsePwrFrame(const String& raw,
 
     config.lastPwrUpdate = config.getCurrentTimeString();
 
-    // --- Double Buffer Write (POINTER VERSION) ---
-    //
-    // Select the target buffer *after* the frame has been fully validated
-    // and parsed. We do NOT toggle before writing, because that would
-    // expose MQTT to a half‑written buffer.
-    //
-    ParsedData* target = useA ? &bufferB : &bufferA;
+    // Web-UI Daten aktualisieren
+    lastParsedStack   = stackOut;
+    lastParsedModules = modulesOut;
 
-    // Write the complete PWR frame into the selected buffe
+    PwrBuffer* target = pwrUseA ? &pwrB : &pwrA;
+
     target->stack   = stackOut;
     target->modules = modulesOut;
 
-    // Update global UI data (not part of the double buffer)
-    lastParsedStack = stackOut;
-    lastParsedModules = modulesOut;
+    pwrUseA = !pwrUseA;
 
-    // -------------------------------------------------------------
-    // Toggle the active buffer ONLY AFTER the frame is fully written.
-    // This guarantees that MQTT always reads a complete, consistent
-    // snapshot and never a partially written one.
-    // -------------------------------------------------------------
-    useA = !useA;
 
-    // Mark parser state flags
-    parserHasData = true;
-    newParserData = true;
+    Log(LOG_INFO, "PWR parser: parsed " + String(count) + " modules");
 
     return PARSE_OK;
-
 }

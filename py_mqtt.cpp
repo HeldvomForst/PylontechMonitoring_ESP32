@@ -1,3 +1,5 @@
+#pragma once
+
 #include "py_log.h"
 #include "config.h"
 #include "py_parser_pwr.h"
@@ -62,9 +64,9 @@ static unsigned long lastReconnectAttempt = 0;
 static unsigned long wifiConnectedSince   = 0;
 
 // Double-buffer for parser data
-ParsedData bufferA;
-ParsedData bufferB;
-volatile bool useA = true;
+//ParsedData bufferA;
+//ParsedData bufferB;
+//volatile bool useA = true;
 
 // MQTT instance
 PyMqtt py_mqtt;
@@ -126,6 +128,7 @@ void PyMqtt::resetDiscovery(bool pwr, bool bat, bool stat) {
 --------------------------------------------------------------------------- */
 void PyMqtt::begin() {
     enabled = config.mqtt.enabled;
+
     if (!enabled) {
         logInfo("MQTT disabled in configuration");
         return;
@@ -134,12 +137,13 @@ void PyMqtt::begin() {
     mqttClient.setServer(config.mqtt.server.c_str(), config.mqtt.port);
     mqttClient.setBufferSize(2048);
 
-    discoveryPwrNeeded  = true;
-    discoveryBatNeeded  = true;
-    discoveryStatNeeded = true;
+    // Discovery darf NICHT automatisch starten
+    discoveryPhase = DISC_IDLE;
+    discoveryActive = false;
 
     logInfo("MQTT: BufferSize set to 2048 bytes");
 }
+
 
 /* ---------------------------------------------------------------------------
    CONNECT
@@ -196,10 +200,12 @@ bool PyMqtt::publishRaw(const String& topic, const String& payload) {
 void PyMqtt::loop() {
     if (!enabled) return;
 
-    // Select active buffer
-    ParsedData localCopy = useA ? bufferA : bufferB;
+    // Double-buffer
+    PwrBuffer* pwr  = pwrUseA  ? &pwrA  : &pwrB;
+    BatBuffer* bat  = batUseA  ? &batA  : &batB;
+    StatBuffer* stat = statUseA ? &statA : &statB;
 
-    // WiFi not ready
+    // WiFi check
     if (WiFi.status() != WL_CONNECTED) {
         wifiConnectedSince = 0;
         return;
@@ -214,85 +220,65 @@ void PyMqtt::loop() {
         return;
     }
 
-    /* ------------------------------------------------
-       1) Process queued MQTT messages
-       ------------------------------------------------ */
+    // ---------------------------------------------------------
+    // DISCOVERY TRIGGER (NEU: startet IMMER, wenn Flag gesetzt)
+    // ---------------------------------------------------------
+    if (discoveryPwrNeeded || discoveryBatNeeded || discoveryStatNeeded) {
+
+        logInfo("MQTT: Discovery start requested");
+
+        discoveryPhase = DISC_STACK;
+        discoveryActive = true;
+
+        discoveryPwrNeeded  = false;
+        discoveryBatNeeded  = false;
+        discoveryStatNeeded = false;
+    }
+
+    // ---------------------------------------------------------
+    // RAW QUEUE
+    // ---------------------------------------------------------
     MqttMessage msg;
     while (xQueueReceive(mqttQueue, &msg, 0) == pdTRUE) {
         publishRaw(String(msg.topic), String(msg.payload));
     }
 
-    /* ------------------------------------------------
-       2) Publish PWR + Stack data
-       ------------------------------------------------ */
-    if (newParserData) {
-
-        publishStack(localCopy.stack);
-
-        for (const auto& mod : localCopy.modules) {
+    // ---------------------------------------------------------
+    // PUBLISH PWR
+    // ---------------------------------------------------------
+    if (parserHasData) {
+        publishStack(pwr->stack);
+        for (const auto& mod : pwr->modules) {
             if (!mod.present) continue;
             publishBat(mod.index, mod);
         }
-
-        newParserData = false;
+        parserHasData = false;
     }
 
-    /* ------------------------------------------------
-       3) Publish BAT cell data
-       ------------------------------------------------ */
+    // ---------------------------------------------------------
+    // PUBLISH BAT CELLS
+    // ---------------------------------------------------------
     if (batParserHasData) {
-
-        int idx = batParserModuleIndex;
-
-        if (!discoveredBat.count(idx))
-            discoveredBat.insert(idx);
-
-        publishBatCells(idx, localCopy.batCells);
+        publishBatCells(batParserModuleIndex, bat->cells);
         batParserHasData = false;
     }
 
-    /* ------------------------------------------------
-       4) Publish STAT data
-       ------------------------------------------------ */
+    // ---------------------------------------------------------
+    // PUBLISH STAT
+    // ---------------------------------------------------------
     if (statParserHasData) {
-
-        int idx = statParserModuleIndex;
-
-        if (!discoveredStat.count(idx))
-            discoveredStat.insert(idx);
-
-        publishStat(idx, localCopy.stat);
+        publishStat(statParserModuleIndex, stat->stat);
         statParserHasData = false;
     }
 
-    /* ------------------------------------------------
-       5) Trigger discovery if needed
-       ------------------------------------------------ */
-    if (mqttClient.connected()) {
+    // ---------------------------------------------------------
+    // DISCOVERY STATE MACHINE
+    // ---------------------------------------------------------
+    handleDiscoveryStep(*pwr, *bat, *stat);
 
-        if ((discoveryPhase == DISC_IDLE || discoveryPhase == DISC_DONE) &&
-            (discoveryPwrNeeded || discoveryBatNeeded || discoveryStatNeeded)) {
-
-            resetDiscovery(
-                discoveryPwrNeeded,
-                discoveryBatNeeded,
-                discoveryStatNeeded
-            );
-
-            discoveryPwrNeeded  = false;
-            discoveryBatNeeded  = false;
-            discoveryStatNeeded = false;
-        }
-    }
-
-    // Run discovery state machine
-    handleDiscoveryStep(localCopy);
-
-    /* ------------------------------------------------
-       6) MQTT client loop
-       ------------------------------------------------ */
     mqttClient.loop();
 }
+
 
 /* ---------------------------------------------------------------------------
    DISCOVERY STATE MACHINE (FRAMEWORK ONLY)
@@ -301,7 +287,11 @@ void PyMqtt::loop() {
    publishDiscoveryBatField, publishDiscoveryStatField) will be implemented in
    PART 3.
 --------------------------------------------------------------------------- */
-void PyMqtt::handleDiscoveryStep(const ParsedData& localCopy) {
+void PyMqtt::handleDiscoveryStep(
+    const PwrBuffer& pwr,
+    const BatBuffer& bat,
+    const StatBuffer& stat
+) {
     if (!enabled || !mqttClient.connected()) return;
 
     switch (discoveryPhase) {
@@ -313,72 +303,55 @@ void PyMqtt::handleDiscoveryStep(const ParsedData& localCopy) {
         case DISC_STACK:
             publishDiscoveryStack();
             discoveryPhase = DISC_PWR;
-            discPwrIndex   = 0;
+            discPwrIndex = 0;
             return;
 
         case DISC_PWR:
-            if (discPwrIndex >= localCopy.modules.size()) {
+            if (discPwrIndex >= pwr.modules.size()) {
                 discoveryPhase = DISC_BAT;
-                discBatModule = discBatCell = discBatField = 0;
+                discBatModule = 0;
                 return;
             }
-
-            if (!localCopy.modules[discPwrIndex].present) {
+            if (!pwr.modules[discPwrIndex].present) {
                 discPwrIndex++;
                 return;
             }
-
-            publishDiscoveryPwrModule(localCopy.modules[discPwrIndex].index);
+            publishDiscoveryPwrModule(pwr.modules[discPwrIndex].index);
             discPwrIndex++;
             return;
 
-        case DISC_BAT: {
-
-            if (discBatModule >= localCopy.modules.size()) {
+        case DISC_BAT:
+            if (discBatModule >= pwr.modules.size()) {
                 discoveryPhase = DISC_STAT;
                 discStatModule = 0;
                 return;
             }
-
-            int moduleIndex = localCopy.modules[discBatModule].index;
-
-            if (!localCopy.modules[discBatModule].present) {
+            if (!pwr.modules[discBatModule].present) {
                 discBatModule++;
                 return;
             }
-
-            // Nur Zellen discovern (keine Modul-Felder)
-            for (size_t i = 0; i < localCopy.batCells.size(); i++) {
-                publishDiscoveryBatCell(moduleIndex, i);
+            for (size_t i = 0; i < bat.cells.size(); i++) {
+                publishDiscoveryBatCell(pwr.modules[discBatModule].index, i);
                 vTaskDelay(5);
             }
-
             discBatModule++;
             return;
-        }
 
-        case DISC_STAT: {
-
-            if (discStatModule >= localCopy.modules.size()) {
+        case DISC_STAT:
+            if (discStatModule >= pwr.modules.size()) {
                 discoveryPhase = DISC_DONE;
                 return;
             }
-
-            int moduleIndex = localCopy.modules[discStatModule].index;
-
-            if (!localCopy.modules[discStatModule].present) {
+            if (!pwr.modules[discStatModule].present) {
                 discStatModule++;
                 return;
             }
-
-            // Neuer Discoverer: Modulweise, nicht Feldweise
-            publishDiscoveryStatModule(moduleIndex);
-
+            publishDiscoveryStatModule(pwr.modules[discStatModule].index);
             discStatModule++;
             return;
-        }
     }
 }
+
 /* ---------------------------------------------------------------------------
    NAME NORMALIZATION
    ---------------------------------------------------------------------------

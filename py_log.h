@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-#include "web/wp_ui.h"
+//#include "web/wp_ui.h"
 
 enum LogLevel {
     LOG_INFO,
@@ -13,9 +13,9 @@ void Log(LogLevel lvl, const String& msg);
 
 void WebLog(const String& msg);
 String WebLogGet();
-void WebLogClear();
+//void WebLogClear();
 
-void PersistentLog(const String& msg);
-String PersistentLogDump();
-extern bool persistentLoggingEnabled;
+//void PersistentLog(const String& msg);
+//String PersistentLogDump();
+//extern bool persistentLoggingEnabled;
 
