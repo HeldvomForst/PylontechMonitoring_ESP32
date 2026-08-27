@@ -7,17 +7,60 @@ function autodetect(name, raw) {
     let n = name.toLowerCase();
     let r = (raw || "").toLowerCase();
 
-    if (n.includes("percent") || r.includes("%"))
-        return { factor: "1", unit: "%", mqtt: true, send: true };
-
-    if (n.includes("coulomb"))
-        return { factor: "0.001", unit: "Ah", mqtt: true, send: true };
-
-    if (isNaN(parseFloat(r)))
+    // ---------- TEXT ----------
+    if (isNaN(parseFloat(r))) {
         return { factor: "text", unit: "", mqtt: false, send: false };
+    }
 
+    // ---------- PERCENT ----------
+    if (n.includes("percent") || n.includes("soh") || r.includes("%")) {
+        return { factor: "1", unit: "%", mqtt: false, send: false };
+    }
+
+    // ---------- COULOMB / CAPACITY ----------
+    if (n.includes("coulomb") || n.includes("cap")) {
+        // Coulomb → convert to Ah
+        return { factor: "0.00027778", unit: "Ah", mqtt: false, send: false };
+    }
+
+    // ---------- VOLT DIFF ----------
+    if (n.includes("volt diff") || n.includes("volt") && n.includes("diff")) {
+        // mV → V
+        return { factor: "0.001", unit: "V", mqtt: false, send: false };
+    }
+
+    // ---------- SECONDS ----------
+    if (n.includes("secs") || n.endsWith(" sec") || n.includes(" sec ")) {
+        // Seconds → Hours (HA-friendly)
+        return { factor: "0.00027778", unit: "h", mqtt: false, send: false };
+    }
+
+    // ---------- HOURS ----------
+    if (n.includes("hours")) {
+        return { factor: "1", unit: "h", mqtt: false, send: false };
+    }
+
+    // ---------- DAYS ----------
+    if (n.includes("days")) {
+        return { factor: "1", unit: "d", mqtt: false, send: false };
+    }
+
+    // ---------- COUNTS ----------
+    if (
+        n.includes("cnt") ||
+        n.includes("times") ||
+        n.includes("items") ||
+        n.includes("cycles") ||
+        n.includes("cycle") ||
+        n.includes("count")
+    ) {
+        return { factor: "1", unit: "", mqtt: false, send: false };
+    }
+
+    // ---------- DEFAULT: numeric but no special meaning ----------
     return { factor: "1", unit: "", mqtt: false, send: false };
 }
+
 
 function statLoad() {
     fetch("/api/stat/values")
@@ -91,27 +134,29 @@ function statLoad() {
                     <td><input value="${display}"></td>
                     <td>${raw}</td>
                     <td>
-                        <select>
-                            <option value="0.0001">0.0001</option>
-                            <option value="0.001">0.001</option>
-                            <option value="0.01">0.01</option>
-                            <option value="0.1">0.1</option>
-                            <option value="1">1</option>
-                            <option value="10">10</option>
-                            <option value="text">text</option>
-                            <option value="date">date</option>
-                        </select>
+						<select>
+							<option value="0.00027778">0.00027778 (s → h)</option>
+							<option value="0.001">0.001 (mV → V)</option>
+							<option value="0.0001">0.0001</option>
+							<option value="0.01">0.01</option>
+							<option value="0.1">0.1</option>
+							<option value="1">1</option>
+							<option value="10">10</option>
+							<option value="text">text</option>
+							<option value="date">date</option>
+						</select>
                     </td>
                     <td>
-                        <select>
-                            <option value=""></option>
-                            <option value="V">V</option>
-                            <option value="A">A</option>
-                            <option value="Ah">Ah</option>
-                            <option value="°C">°C</option>
-                            <option value="%">%</option>
-                            <option value="timestamp">timestamp</option>
-                        </select>
+						<select>
+							<option value=""></option>
+							<option value="%">%</option>
+							<option value="Ah">Ah</option>
+							<option value="V">V</option>
+							<option value="h">h (hours)</option>
+							<option value="s">s (seconds)</option>
+							<option value="d">d (days)</option>
+							<option value="timestamp">timestamp</option>
+						</select>
                     </td>
                     <td><input type="checkbox" class="mqtt"></td>
                     <td><input type="checkbox" class="send"></td>

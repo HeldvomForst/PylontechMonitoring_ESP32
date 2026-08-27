@@ -1,34 +1,39 @@
-<h2>Dashboard</h2>
+<h2 id="dash_title"></h2>
 
 <div class="dashboard-grid">
 
-    <div class="card" id="wifiCard">
-        <h2>WiFi</h2>
-        <p><b>Mode:</b> <span id="wifi_mode"></span></p>
-        <p><b>SSID:</b> <span id="wifi_ssid"></span></p>
-        <p><b>IP:</b> <span id="wifi_ip"></span></p>
-        <p><b>RSSI:</b> <span id="wifi_rssi"></span> dBm</p>
-    </div>
+<div class="card" id="wifiCard">
+<h2 id="dash_wifi"></h2>
+<p><b id="dash_mode"></b>: <span id="wifi_mode"></span></p>
+<p><b id="dash_ssid"></b>: <span id="wifi_ssid"></span></p>
+<p><b id="dash_ip"></b>: <span id="wifi_ip"></span></p>
+<p><b id="dash_rssi"></b>: <span id="wifi_rssi"></span> dBm</p>
+</div>
 
-    <div class="card" id="mqttCard">
-        <h2>MQTT</h2>
-        <p><b>Status:</b> <span id="mqtt_status"></span></p>
-        <p><b>Server:</b> <span id="mqtt_server"></span></p>
-        <p><b>Last contact:</b> <span id="mqtt_last"></span></p>
-    </div>
+<div class="card" id="mqttCard">
+    <h2 id="dash_mqtt"></h2>
 
-    <div class="card" id="batteryCard">
-        <h2>Batterie</h2>
-        <p><b>Detected modules:</b> <span id="bat_modules"></span></p>
-        <p><b>Last update:</b> <span id="bat_last"></span></p>
-    </div>
+    <p><b id="dash_status"></b>: <span id="mqtt_status"></span></p>
+	<p><b id="dash_server"></b>: <span id="mqtt_server"></span></p>
+    <p><b id="dash_last_pwr"></b>: <span id="mqtt_last_pwr"></span></p>
+    <p><b id="dash_last_bat"></b>: <span id="mqtt_last_bat"></span></p>
+    <p><b id="dash_last_stat"></b>: <span id="mqtt_last_stat"></span></p>
 
-    <div class="card" id="systemCard">
-        <h2>System</h2>
-        <p><b>Time:</b> <span id="sys_time"></span></p>
-        <p><b>Uptime:</b> <span id="sys_uptime"></span></p>
-        <p><b>Firmware:</b> <span id="sys_fw"></span></p>
-    </div>
+</div>
+
+
+<div class="card" id="batteryCard">
+<h2 id="dash_battery"></h2>
+<p><b id="dash_detected"></b>: <span id="bat_modules"></span></p>
+<p><b id="dash_update"></b>: <span id="bat_last"></span></p>
+</div>
+
+<div class="card" id="systemCard">
+<h2 id="dash_system"></h2>
+<p><b id="dash_time"></b>: <span id="sys_time"></span></p>
+<p><b id="dash_uptime"></b>: <span id="sys_uptime"></span></p>
+<p><b id="dash_firmware"></b>: <span id="sys_fw"></span></p>
+</div>
 
 </div>
 

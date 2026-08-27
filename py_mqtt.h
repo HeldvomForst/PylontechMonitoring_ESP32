@@ -5,111 +5,112 @@
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
 #include "config.h"
-#include "py_parser_pwr.h"
 
-
-// Forward declarations
-struct BatteryModule;
-struct BatteryStack;
-struct BatField;
-struct BatData;
-struct StatField;
-struct StatData;
-struct ParsedData;
-
+// -------------------------------------------------------------
+// MQTT Message (Topic + Payload)
+// -------------------------------------------------------------
 struct MqttMessage {
     char topic[128];
-    char payload[64];
+    char payload[512];
+    bool retain;
 };
 
+// -------------------------------------------------------------
+// Discovery phases
+// -------------------------------------------------------------
+enum DiscoveryPhase {
+    DISC_IDLE,
+    DISC_STACK,
+    DISC_PWR,
+    DISC_BAT,
+    DISC_STAT,
+    DISC_DONE
+};
+
+extern DiscoveryPhase discoveryPhase;
+extern size_t discPwrIndex;
+extern size_t discBatModule;
+extern size_t discStatModule;
+
+
+// -------------------------------------------------------------
+// Main MQTT class
+// -------------------------------------------------------------
 class PyMqtt {
 public:
-    // Core lifecycle
     void begin();
     void loop();
-    void resetDiscovery(bool pwr, bool bat, bool stat);
-
-    // Raw publish (Task1 → Task2)
-    bool publishRaw(const String& topic, const String& payload);
-
-    // Publish parsed data
-    void publishStack(const BatteryStack& stack);
-    void publishBat(int index, const BatteryModule& mod);
-    void publishDiscoveryBatModule(int moduleIndex);
-    void publishDiscoveryBatCell(int moduleIndex, int cellIndex);
-    void publishBatCells(int moduleIndex, const std::vector<BatData>& batCells);
-    void publishStat(int moduleIndex, const StatData& stat);
-
-    bool isDiscoveryActive() const { return discoveryActive; }
-
-    bool isConnected() { return mqttClient.connected(); }
-    void publishDiscoveryStatModule(int moduleIndex);
-    bool publishDirect(const String& topic, const String& payload);
-
-
-
-private:
-    WiFiClient   wifiClient;
-    PubSubClient mqttClient = PubSubClient(wifiClient);
-
-    bool enabled = false;
-    bool discoveryActive = false;
-
-    int precisionForUnit(const String& unit);
-    bool precisionDiffersFromDefault(const String& unit);
-
-    // MQTT connection
     bool connect();
+    void disconnect();
+    void reconnectTask();
 
-    // Value conversion (numeric, text, date)
-    String computeValue(const String& raw, const FieldConfig& fc);
+    // Direktes Publish ohne Queue
+    bool publishRaw(const String& topic, const String& payload, bool retain = false);
 
-    // Name normalization (CamelCase)
-    String normalizeName(const String& in);
-
-    // Decimal precision based on unit
-    int decimalsForUnit(const String& unit);
-
-    // Device class based on unit
-    String deviceClassForUnit(const String& unit);
-
-    // Build MQTT topic
-    String buildTopic(
-        const String& subtopic,
-        int moduleIndex,
-        const String& fieldName,
-        int cellIndex,
-        bool isCell
-    );
-
-    // Build unique_id, object_id, friendly_name, discovery topic
-    void buildDiscoveryIds(
-        String& uniqueId,
-        String& objectId,
-        String& friendlyName,
-        String& discoveryTopic,
-        const String& subtopic,
-        int moduleIndex,
-        const String& displayName,
-        int cellIndex,
-        bool isCell
-    );
-
-    // Add HA metadata (unit, device_class, precision)
-    void addDiscoveryMeta(JsonDocument& doc, const FieldConfig& fc);
+    // Status
+    bool isConnected() { return mqttClient.connected(); }
 
     // Discovery publishers
     void publishDiscoveryStack();
     void publishDiscoveryPwrModule(int moduleIndex);
-    void publishDiscoveryStatField(int moduleIndex, const StatField& f);
+    void publishDiscoveryBatModule(int moduleIndex);
+    void publishDiscoveryStatModule(int moduleIndex);
 
     // Discovery state machine
-    void handleDiscoveryStep(
-        const PwrBuffer& pwr,
-        const BatBuffer& bat,
-        const StatBuffer& stat
-    );
+    void handleDiscoveryStep();
 
-    // Logging helper
+    // Data publishers
+    void publishStack();
+    void publishPwrSingle();
+    void publishBatModule(int moduleIndex);
+    void publishStat(int moduleIndex);
+
+    void handlePwrBatch();
+
+private:
+    // Core MQTT
+    WiFiClient   wifiClient;
+    PubSubClient mqttClient = PubSubClient(wifiClient);
+
+    bool enabled          = false;
+    bool discoveryActive  = false;
+
+    bool mqttOk           = false;
+    bool reconnectNeeded  = false;
+    unsigned long lastReconnectAttempt = 0;
+    unsigned long lastMqttOk           = 0;
+
+    unsigned long wifiConnectedSince   = 0;
+    bool mqttStartAllowed              = false;
+
+    // Reconnect timing
+    unsigned long reconnectIntervalMs;
+    const unsigned long reconnectIntervalMin = 5000;
+    const unsigned long reconnectIntervalMax = 60000;
+
+    // Discovery timing
+    unsigned long discoveryLastSend = 0;
+    unsigned long discoveryStartTime = 0;
+    int discoveryMessagesPerSecond = 5;
+    int discoveryDelayStartMs      = 2000;
+
+    // Helpers
+    String normalizeName(const String& in);
+    int decimalsForUnit(const String& unit);
+    String deviceClassForUnit(const String& unit);
+    bool precisionDiffersFromDefault(const String& unit);
+    int precisionForUnit(const String& unit);
+    String computeValue(const String& raw, const FieldConfig& fc);
+    void addDiscoveryMeta(JsonDocument& doc, const FieldConfig& fc);
+
+    // PWR JSON builder
+    String buildPwrJson(int moduleIndex);
+    void sendPwrModule(int moduleIndex);
+
     void logPublishFailure(const String& topic);
 };
+
+
+
+// Global instance
+extern PyMqtt py_mqtt;

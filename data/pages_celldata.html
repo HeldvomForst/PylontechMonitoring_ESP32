@@ -1,64 +1,64 @@
 <div class="content">
 
-<h2>Celldata</h2>
+<h2 id="cell_title"></h2>
 
 <div class="conn-grid-3">
 
-    <div class="conn-box">
-        <div class="conn-header">BAT Parser</div>
-        <div class="conn-body">
-            <label>
-                <input id="enable_bat" type="checkbox">
-                Aktivieren
-            </label>
-        </div>
+<div class="conn-box">
+    <div class="conn-header" id="cell_parser_header"></div>
+    <div class="conn-body">
+        <label>
+            <input id="enable_bat" type="checkbox">
+            <span id="cell_enable_label"></span>
+        </label>
     </div>
+</div>
 
-    <div class="conn-box">
-        <div class="conn-header">MQTT Subtopics</div>
-        <div class="conn-body">
-            <label>Topic BAT<br>
-            <input id="topic_bat" type="text">
-            </label>
-            <br><br>
-            <label>Cell Prefix<br>
-            <input id="cell_prefix" type="text">
-            </label>
-        </div>
-    </div>
+<div class="conn-box">
+    <div class="conn-header" id="cell_mqtt_header"></div>
+    <div class="conn-body">
+        <label id="cell_topic_label"></label><br>
+        <input id="topic_bat" type="text">
 
-    <div class="conn-box">
-        <div class="conn-header">Abfrageintervall</div>
-        <div class="conn-body">
-            <label>BAT (Sekunden)<br>
-            <input id="interval_bat" type="number">
-            </label>
-        </div>
+        <br><br>
+
+        <label id="cell_prefix_label"></label><br>
+        <input id="cell_prefix" type="text">
     </div>
+</div>
+
+<div class="conn-box">
+    <div class="conn-header" id="cell_interval_header"></div>
+    <div class="conn-body">
+        <label id="cell_interval_label"></label><br>
+        <input id="interval_bat" type="number">
+    </div>
+</div>
 
 </div>
 
-<!-- 🔥 HIER KOMMT DIE TABELLE -->
 <div class="conn-box">
-    <div class="conn-header">Zellwerte</div>
+    <div class="conn-header" id="cell_table_header"></div>
     <div class="conn-body">
 
         <table class="conn-table">
             <thead>
                 <tr>
-                    <th>Feldname</th>
-                    <th>Anzeigename</th>
-                    <th>Rohdaten</th>
-                    <th>Faktor</th>
-                    <th>Einheit</th>
-                    <th>MQTT</th>
-                    <th>Send</th>
+                    <th id="cell_col_field"></th>
+                    <th id="cell_col_display"></th>
+                    <th id="cell_col_raw"></th>
+                    <th id="cell_col_factor"></th>
+                    <th id="cell_col_unit"></th>
+                    <th id="cell_col_mqtt"></th>
+                    <th id="cell_col_send"></th>
                 </tr>
             </thead>
+
             <tbody id="bat_table"></tbody>
         </table>
 
-        <button onclick="batSave()">Speichern</button>
+        <button onclick="batSave()" id="cell_btn_save"></button>
+
     </div>
 </div>
 

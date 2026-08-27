@@ -1,115 +1,213 @@
 #pragma once
-#include <WebServer.h>
+#include "api_core.h"
 #include <SPIFFS.h>
-#include "filemanager.h"
+#include "../py_log.h"      // dein Logging
+#include "filemanager.h"    // enthält FILEMANAGER_PAGE
 
-void registerFileManagerAPI(WebServer &server) {
+//
+// /filemanager → HTML-Seite
+//
+static esp_err_t api_filemanager_page(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, FILEMANAGER_PAGE, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
 
-    // ---------------------------------------------------------
-    // HTML-Seite (RAM-frei, PROGMEM-Streaming)
-    // ---------------------------------------------------------
-    server.on("/filemanager", HTTP_GET, [&]() {
-        server.setContentLength(strlen_P(FILEMANAGER_PAGE));
-        server.send(200, "text/html", "");
-        server.sendContent_P(FILEMANAGER_PAGE);
-        server.sendContent("");
-    });
+//
+// JSON-Escape für Dateinamen
+//
+static String jsonEscape(const char *s) {
+    String out;
+    while (*s) {
+        char c = *s++;
+        switch (c) {
+            case '\"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((uint8_t)c < 0x20) {
+                    char buf[7];
+                    sprintf(buf, "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
 
-    // ---------------------------------------------------------
-    // Directory Listing (Streaming JSON)
-    // ---------------------------------------------------------
-    server.on("/fm/list", HTTP_GET, [&]() {
-        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-        server.send(200, "application/json", "");
+//
+// /fm/list
+//
+static esp_err_t api_fm_list(httpd_req_t *req) {
 
-        server.sendContent("[");
+    Log(LOG_DEBUG, "FM: LIST");
 
-        File root = SPIFFS.open("/");
-        File file = root.openNextFile();
-        bool first = true;
+    File root = SPIFFS.open("/");
+    File f = root.openNextFile();
 
-        while (file) {
-            if (!first) server.sendContent(",");
-            first = false;
+    String out = "[";
+    bool first = true;
 
-            server.sendContent("{\"name\":\"");
-            server.sendContent(file.name());
-            server.sendContent("\",\"size\":");
-            server.sendContent(String(file.size()));
-            server.sendContent("}");
+    while (f) {
+        if (!first) out += ",";
+        first = false;
 
-            file = root.openNextFile();
+        out += "{\"name\":\"";
+        out += jsonEscape(f.name());
+        out += "\",\"size\":";
+        out += f.size();
+        out += "}";
+
+        f = root.openNextFile();
+    }
+
+    out += "]";
+
+    apiJson(req, out);
+    return ESP_OK;
+}
+
+//
+// /fm/delete
+//
+static esp_err_t api_fm_delete(httpd_req_t *req) {
+
+    String file = apiArg(req, "file");
+    if (file.isEmpty()) {
+        apiError(req, 400, "Missing file");
+        return ESP_OK;
+    }
+
+    String path = "/" + file;
+    Log(LOG_INFO, "FM: DELETE " + path);
+
+    if (!SPIFFS.exists(path)) {
+        apiError(req, 404, "File not found");
+        return ESP_OK;
+    }
+
+    SPIFFS.remove(path);
+    apiText(req, "OK");
+    return ESP_OK;
+}
+
+//
+// /fm/upload  – wie OTA: kompletten Body lesen, roh schreiben, mit Debug-Log
+//
+static esp_err_t api_fm_upload(httpd_req_t *req)
+{
+    String file = apiArg(req, "file");
+    if (file.isEmpty()) {
+        apiError(req, 400, "Missing file");
+        return ESP_OK;
+    }
+
+    String path = "/" + file;
+    Log(LOG_INFO, "FM: UPLOAD start file=" + path);
+
+    File f = SPIFFS.open(path, "w");
+    if (!f) {
+        Log(LOG_ERROR, "FM: Cannot open for write: " + path);
+        apiError(req, 500, "Cannot open file");
+        return ESP_OK;
+    }
+
+    char buf[1024];
+    size_t total = 0;
+
+    while (true) {
+        int len = httpd_req_recv(req, buf, sizeof(buf));
+
+        if (len < 0) {
+            Log(LOG_ERROR, "FM: recv error len=" + String(len) + " total=" + String(total));
+            f.close();
+            apiError(req, 500, "Upload recv error");
+            return ESP_OK;
         }
 
-        server.sendContent("]");
-        server.sendContent("");
-    });
-
-    // ---------------------------------------------------------
-    // File Download (perfekt, streamFile)
-    // ---------------------------------------------------------
-    server.on("/fm/download", HTTP_GET, [&]() {
-        if (!server.hasArg("file")) {
-            server.send(400, "text/plain", "Missing file");
-            return;
+        if (len == 0) {
+            Log(LOG_DEBUG, "FM: recv finished total=" + String(total));
+            break;
         }
 
-        String path = server.arg("file");
-        File f = SPIFFS.open(path, "r");
-        if (!f) {
-            server.send(404, "text/plain", "File not found");
-            return;
-        }
+        f.write((uint8_t*)buf, len);
+        total += len;
 
-        server.streamFile(f, "application/octet-stream");
-        f.close();
-    });
+        Log(LOG_DEBUG, "FM: recv len=" + String(len) + " total=" + String(total));
+    }
 
-	// ---------------------------------------------------------
-	// File Delete (korrigiert)
-	// ---------------------------------------------------------
-	server.on("/fm/delete", HTTP_GET, [&]() {
-		if (!server.hasArg("file")) {
-			server.send(400, "text/plain", "Missing file");
-			return;
-		}
+    f.close();
 
-		String path = server.arg("file");
+    Log(LOG_INFO, "FM: UPLOAD done file=" + path + " size=" + String(total));
 
-		// WICHTIG: führenden Slash erzwingen
-		if (!path.startsWith("/")) {
-			path = "/" + path;
-		}
+    apiText(req, "OK");
+    return ESP_OK;
+}
 
-		if (!SPIFFS.exists(path)) {
-			server.send(404, "text/plain", "File not found: " + path);
-			return;
-		}
+//
+// /fm/download
+//
+static esp_err_t api_fm_download(httpd_req_t *req) {
 
-		SPIFFS.remove(path);
-		server.send(200, "text/plain", "OK");
-	});
+    String file = apiArg(req, "file");
+    if (file.isEmpty()) {
+        apiError(req, 400, "Missing file");
+        return ESP_OK;
+    }
 
+    String path = "/" + file;
+    Log(LOG_INFO, "FM: DOWNLOAD " + path);
 
-    // ---------------------------------------------------------
-    // File Upload (RAM-sicher)
-    // ---------------------------------------------------------
-    server.on("/fm/upload", HTTP_POST,
-        [&]() { server.send(200, "text/plain", "OK"); },
-        [&]() {
-            HTTPUpload &up = server.upload();
-            static File uploadFile;
+    if (!SPIFFS.exists(path)) {
+        apiError(req, 404, "File not found");
+        return ESP_OK;
+    }
 
-            if (up.status == UPLOAD_FILE_START) {
-                String filename = "/" + up.filename;
-                uploadFile = SPIFFS.open(filename, "w");
-            }
-            else if (up.status == UPLOAD_FILE_WRITE) {
-                if (uploadFile) uploadFile.write(up.buf, up.currentSize);
-            }
-            else if (up.status == UPLOAD_FILE_END) {
-                if (uploadFile) uploadFile.close();
-            }
-        }
-    );
+    File f = SPIFFS.open(path, "r");
+    if (!f) {
+        Log(LOG_ERROR, "FM: Cannot open for read: " + path);
+        apiError(req, 500, "Cannot open file");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/octet-stream");
+
+    uint8_t buf[1024];
+    size_t total = 0;
+    while (f.available()) {
+        size_t n = f.read(buf, sizeof(buf));
+        if (n == 0) break;
+        httpd_resp_send_chunk(req, (const char*)buf, n);
+        total += n;
+    }
+
+    Log(LOG_INFO, "FM: DOWNLOAD done size=" + String(total));
+
+    httpd_resp_send_chunk(req, NULL, 0);
+    f.close();
+    return ESP_OK;
+}
+
+//
+// Registrierung
+//
+inline void registerFilemanagerAPI() {
+
+    httpd_uri_t r1 = { "/filemanager", HTTP_GET,  api_filemanager_page, NULL };
+    httpd_uri_t r2 = { "/fm/list",     HTTP_GET,  api_fm_list,          NULL };
+    httpd_uri_t r3 = { "/fm/delete",   HTTP_GET,  api_fm_delete,        NULL };
+    httpd_uri_t r4 = { "/fm/upload",   HTTP_POST, api_fm_upload,        NULL };
+    httpd_uri_t r5 = { "/fm/download", HTTP_GET,  api_fm_download,      NULL };
+
+    httpd_register_uri_handler(server, &r1);
+    httpd_register_uri_handler(server, &r2);
+    httpd_register_uri_handler(server, &r3);
+    httpd_register_uri_handler(server, &r4);
+    httpd_register_uri_handler(server, &r5);
 }

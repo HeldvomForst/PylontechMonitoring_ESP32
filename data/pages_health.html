@@ -1,60 +1,57 @@
 <div class="card">
-    <h2>Health Status</h2>
+
+    <h2 id="health_title"></h2>
+
     <div id="health_header" class="card" style="padding:10px; font-weight:bold;"></div>
 
-    <h3>Module</h3>
+    <h3 id="health_module_header"></h3>
+
     <table class="conn-table" id="health_table">
         <thead>
             <tr>
-                <th>Modul</th>
-                <th>Status</th>
-                <th>Temp Max</th>
-                <th>Cell Min</th>
-                <th>Cell Max</th>
-                <th>Delta</th>
+                <th id="health_col_module"></th>
+                <th id="health_col_status"></th>
+                <th id="health_col_tempmax"></th>
+                <th id="health_col_cellmin"></th>
+                <th id="health_col_cellmax"></th>
+                <th id="health_col_delta"></th>
             </tr>
         </thead>
         <tbody></tbody>
     </table>
 
-    <h3>Stack</h3>
+    <h3 id="health_stack_header"></h3>
     <div id="stack_info"></div>
 
-    <h3>Listen</h3>
-    <div>OK: <span id="ok_list"></span></div>
-    <div>Warnung: <span id="warn_list"></span></div>
-    <div>Fehler: <span id="err_list"></span></div>
+    <h3 id="health_list_header"></h3>
+    <div><span id="health_list_ok_label"></span>: <span id="ok_list"></span></div>
+    <div><span id="health_list_warn_label"></span>: <span id="warn_list"></span></div>
+    <div><span id="health_list_err_label"></span>: <span id="err_list"></span></div>
 
-    <h3>Historie</h3>
-    <div>Warnungen: <span id="warn_hist"></span></div>
-    <div>Fehler: <span id="err_hist"></span></div>
+    <h3 id="health_hist_header"></h3>
+    <div><span id="health_hist_warn_label"></span>: <span id="warn_hist"></span></div>
+    <div><span id="health_hist_err_label"></span>: <span id="err_hist"></span></div>
 
-    <button onclick="healthReset()">Reset</button>
+    <button onclick="healthReset()" id="health_reset"></button>
+
 </div>
+
 <div class="card" style="margin-top:20px;">
-  <h3>Health‑Schwellwerte</h3>
 
-  <label>Warnschwelle (V):</label>
-  <input id="cellDiffWarn"
-         type="number"
-         step="0.001"
-         style="width:100px"
-         oninput="healthAutoReload = false">
+    <h3 id="health_threshold_header"></h3>
 
-  <br><br>
+    <label id="health_warn_label"></label>
+    <input id="cellDiffWarn" type="number" step="0.001" style="width:100px" oninput="healthAutoReload = false">
 
-  <label>Fehlerschwelle (V):</label>
-  <input id="cellDiffError"
-         type="number"
-         step="0.001"
-         style="width:100px"
-         oninput="healthAutoReload = false">
+    <br><br>
 
-  <br><br>
+    <label id="health_error_label"></label>
+    <input id="cellDiffError" type="number" step="0.001" style="width:100px" oninput="healthAutoReload = false">
 
-  <button onclick="saveHealthConfig()">Speichern</button>
+    <br><br>
+
+    <button onclick="saveHealthConfig()" id="health_save"></button>
+
 </div>
-
-
 
 <script src="/static_health.js"></script>

@@ -1,20 +1,58 @@
 // -------------------------------------------------------------
-// init
+// Global Error Handler
 // -------------------------------------------------------------
-function initConnectionPage() {
-    wifiLoadStatus();
-    mqttLoad();
-    tzLoad();
-    timeLoad();
-    ipLoad();
+window.onerror = function(msg, url, line, col, error) {
+    console.log("JS ERROR:", msg, "Line:", line, "Col:", col);
+};
+
+// -------------------------------------------------------------
+// Hilfsfunktion: fetch als Promise
+// -------------------------------------------------------------
+function fetchJson(url) {
+    return fetch(url).then(r => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+    });
+}
+
+function fetchText(url, options = {}) {
+    return fetch(url, options).then(r => r.text());
+}
+
+// -------------------------------------------------------------
+// Init – SEQUENTIELL
+// -------------------------------------------------------------
+async function initConnectionPage() {
+
+    try {
+        await wifiLoadStatus();
+        await mqttLoad();
+        await tzLoad();
+        await timeLoad();
+        await ipLoad();
+    }
+    catch (e) {
+        console.error("Connection init failed:", e);
+    }
+
+    // Event Listener erst NACH dem Laden setzen
+    let region = document.getElementById("tz_region");
+    let city   = document.getElementById("tz_city");
+
+    if (region) region.addEventListener("change", tzRegionChanged);
+    if (city)   city.addEventListener("change", tzCityChanged);
+
+    // Sprache erst anwenden, wenn ALLES geladen ist
+    if (typeof applyLanguage === "function") {
+        applyLanguage();
+    }
 }
 
 // -------------------------------------------------------------
 // WiFi
 // -------------------------------------------------------------
 function wifiLoadStatus() {
-    fetch("/api/wifi")
-        .then(r => r.json())
+    return fetchJson("/api/wifi")
         .then(j => {
             document.getElementById("wifi_status").textContent =
                 `Connected: ${j.connected}, SSID: ${j.ssid}, RSSI: ${j.rssi}, IP: ${j.ip}`;
@@ -22,13 +60,12 @@ function wifiLoadStatus() {
 }
 
 function wifiScan() {
-    fetch("/api/wifi/scan")
-        .then(r => r.json())
+    return fetchJson("/api/wifi_scan")   // statt "/api/wifi/scan"
         .then(data => {
 
             let nets = data.nets || [];
 
-            // Duplikate entfernen → stärkstes Signal behalten
+            // Duplikate → stärkstes Signal behalten
             let best = {};
             nets.forEach(n => {
                 if (!best[n.ssid] || n.rssi > best[n.ssid].rssi) {
@@ -36,12 +73,9 @@ function wifiScan() {
                 }
             });
 
-            // In Array umwandeln + sortieren
             let list = Object.values(best).sort((a, b) => b.rssi - a.rssi);
 
-            // HTML erzeugen
             let html = "";
-
             list.forEach(n => {
                 html += `
                     <div class="wifi-entry">
@@ -64,7 +98,6 @@ function wifiScan() {
         });
 }
 
-
 function wifiSelectAndConnect(ssid) {
     document.getElementById("wifi_ssid").value = ssid;
     document.getElementById("wifi_pass").value = "";
@@ -72,24 +105,19 @@ function wifiSelectAndConnect(ssid) {
     wifiToggleManual();
 }
 
-
 function wifiConnectScan(ssid) {
     let pass = document.getElementById("pass_" + ssid).value;
 
-    let data = {
-        ssid: ssid,
-        pass: pass
-    };
+    let data = { ssid: ssid, pass: pass };
 
-    fetch("/api/wifi", {
+    return fetchText("/api/wifi", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(data)
     })
-    .then(r => r.text())
     .then(t => {
         document.getElementById("wifi_msg").textContent = t;
-        wifiLoadStatus();
+        return wifiLoadStatus();
     });
 }
 
@@ -98,13 +126,11 @@ function wifiToggleManual() {
     box.style.display = document.getElementById("wifi_manual").checked ? "block" : "none";
 }
 
-
 // -------------------------------------------------------------
 // MQTT
 // -------------------------------------------------------------
 function mqttLoad() {
-    fetch("/api/mqtt")
-        .then(r => r.json())
+    return fetchJson("/api/mqtt")
         .then(j => {
             document.getElementById("mqtt_enabled").checked = j.enabled;
             document.getElementById("mqtt_server").value = j.server;
@@ -124,33 +150,29 @@ function mqttSave() {
         topic: document.getElementById("mqtt_topic").value
     };
 
-    fetch("/api/mqtt", {
+    return fetchText("/api/mqtt", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(data)
     })
-    .then(r => r.text())
     .then(t => document.getElementById("mqtt_msg").textContent = t);
 }
 
 // -------------------------------------------------------------
-// NTP / Time – MODI
+// NTP / Time
 // -------------------------------------------------------------
+if (typeof TZDATA === "undefined") var TZDATA = {};
+if (typeof CURRENT_NTP_SERVER === "undefined") var CURRENT_NTP_SERVER = "";
+
 function ntpModeSelect(mode) {
 
     const g = document.getElementById("ntp_gateway");
     const m = document.getElementById("ntp_manual");
     const t = document.getElementById("time_manual");
 
-    if (mode === "gateway") {
-        g.checked = true; m.checked = false; t.checked = false;
-    }
-    if (mode === "manual") {
-        g.checked = false; m.checked = true; t.checked = false;
-    }
-    if (mode === "time") {
-        g.checked = false; m.checked = false; t.checked = true;
-    }
+    if (mode === "gateway") { g.checked = true;  m.checked = false; t.checked = false; }
+    if (mode === "manual")  { g.checked = false; m.checked = true;  t.checked = false; }
+    if (mode === "time")    { g.checked = false; m.checked = false; t.checked = true; }
 
     document.getElementById("ntp_manual_box").style.display = m.checked ? "block" : "none";
     document.getElementById("time_manual_box").style.display = t.checked ? "block" : "none";
@@ -158,33 +180,21 @@ function ntpModeSelect(mode) {
     updateCurrentNtpServer();
 }
 
-
-
-// -------------------------------------------------------------
-// Aktueller Server
-// -------------------------------------------------------------
 function updateCurrentNtpServer() {
     const t = document.getElementById("time_manual").checked;
 
     if (t) {
         document.getElementById("ntp_current").textContent = "Manual time (kein NTP)";
     } else {
-        // Immer den Server aus der API anzeigen
         document.getElementById("ntp_current").textContent = CURRENT_NTP_SERVER;
     }
 }
 
-
-
 // -------------------------------------------------------------
 // Timezones
 // -------------------------------------------------------------
-let TZDATA = {};
-let CURRENT_NTP_SERVER = "";
-
 function tzLoad() {
-    fetch("/timezone.json")
-        .then(r => r.json())
+    return fetchJson("/timezone.json")
         .then(j => {
             TZDATA = j;
 
@@ -223,37 +233,30 @@ function tzCityChanged() {
 }
 
 // -------------------------------------------------------------
-// Load from API
+// Time Load
 // -------------------------------------------------------------
 function timeLoad() {
-    fetch("/api/time")
-        .then(r => r.json())
+    return fetchJson("/api/time")
         .then(j => {
 
-            // Checkboxen korrekt setzen
             document.getElementById("ntp_gateway").checked = j.use_gateway_ntp;
             document.getElementById("ntp_manual").checked  = j.manual_ntp;
             document.getElementById("time_manual").checked = j.manual_mode;
 
-            // Manual NTP Eingabefeld: immer pool.ntp.org
             document.getElementById("ntp_server").value = "pool.ntp.org";
 
-            // Manual Time Felder
             document.getElementById("time_date").value = j.manual_date;
             document.getElementById("time_time").value = j.manual_time;
             document.getElementById("time_dst").checked = j.manual_dst;
 
-            // Timezone korrekt setzen
             let [region, city] = j.timezone.split("/");
             document.getElementById("tz_region").value = region;
             tzRegionChanged();
             document.getElementById("tz_city").value = j.timezone;
 
-            // API-Server merken und anzeigen
             CURRENT_NTP_SERVER = j.server;
             document.getElementById("ntp_current").textContent = CURRENT_NTP_SERVER;
 
-            // Modi aktivieren (nur UI, darf ntp_current NICHT überschreiben)
             ntpModeSelect(
                 j.use_gateway_ntp ? "gateway" :
                 j.manual_ntp      ? "manual"  :
@@ -263,7 +266,7 @@ function timeLoad() {
 }
 
 // -------------------------------------------------------------
-// Save to API
+// Time Save
 // -------------------------------------------------------------
 function timeSave() {
     let data = {
@@ -277,36 +280,28 @@ function timeSave() {
         timezone: document.getElementById("tz_full").value
     };
 
-    fetch("/api/time", {
+    return fetchText("/api/time", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(data)
     })
-    .then(r => r.text())
     .then(t => document.getElementById("time_msg").textContent = t);
 }
 
 // -------------------------------------------------------------
 // IP Config
 // -------------------------------------------------------------
-// -------------------------------------------------------------
-// IP Config
-// -------------------------------------------------------------
 function ipLoad() {
-    fetch("/api/network")
-        .then(r => r.json())
+    return fetchJson("/api/network")
         .then(j => {
 
-            // DHCP setzen
             document.getElementById("ip_dhcp").checked = j.dhcp;
 
-            // Felder setzen
             document.getElementById("ip_addr").value = j.ip;
             document.getElementById("ip_mask").value = j.mask;
             document.getElementById("ip_gw").value = j.gw;
             document.getElementById("ip_dns").value = j.dns;
 
-            // Sichtbarkeit aktualisieren
             ipToggleDhcp();
         });
 }
@@ -325,26 +320,15 @@ function ipSave() {
         dns:  document.getElementById("ip_dns").value
     };
 
-    fetch("/api/network", {
+    return fetchText("/api/network", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(data)
     })
-    .then(r => r.text())
     .then(t => document.getElementById("ip_msg").textContent = t);
 }
 
-
 // -------------------------------------------------------------
-// Init
+// Seite initialisieren
 // -------------------------------------------------------------
-window.addEventListener("load", () => {
-    wifiLoadStatus();
-    mqttLoad();
-    tzLoad();
-    timeLoad();
-    ipLoad();
-
-    document.getElementById("tz_region").addEventListener("change", tzRegionChanged);
-    document.getElementById("tz_city").addEventListener("change", tzCityChanged);
-});
+initConnectionPage();

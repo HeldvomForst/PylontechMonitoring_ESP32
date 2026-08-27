@@ -1,4 +1,4 @@
-<h2>Log</h2>
+<h2 id="log_title"></h2>
 
 <!-- Oberes Logfenster -->
 <div class="log-box">
@@ -7,59 +7,31 @@
 
 <!-- Reload Button -->
 <div class="box" style="margin-top: 10px;">
-    <button onclick="loadLog()">Reload</button>
+    <button onclick="loadLog()" id="log_reload"></button>
 </div>
 
 <!-- Log Level Auswahl -->
 <div class="box" style="margin-top: 10px;">
-    <h3>Log Level Filter</h3>
+    <h3 id="log_filter"></h3>
 
-    <label><input type="checkbox" id="log_info"> Info</label>
-    <label><input type="checkbox" id="log_warn"> Warn</label>
-    <label><input type="checkbox" id="log_error"> Error</label>
-    <label><input type="checkbox" id="log_debug"> Debug</label>
+    <label><input type="checkbox" id="log_info_cb"> <span id="log_info"></span></label>
+    <label><input type="checkbox" id="log_warn_cb"> <span id="log_warn"></span></label>
+    <label><input type="checkbox" id="log_error_cb"> <span id="log_error"></span></label>
+    <label><input type="checkbox" id="log_debug_cb"> <span id="log_debug"></span></label>
 
-    <button onclick="saveLogLevel()">Save</button>
+    <button onclick="saveLogLevel()" id="log_save"></button>
 
-    <!-- Rückmeldung nach Save -->
     <pre id="logmsg"></pre>
 </div>
 
 <!-- Service-Modus -->
 <div class="box" style="margin-top: 20px;">
-    <h3>Service-Modus</h3>
+    <h3 id="log_service_header"></h3>
 
     <label>
         <input type="checkbox" id="serviceToggle">
-        Service aktivieren
+        <span id="log_service_enable"></span>
     </label>
-
 </div>
 
 <script src="/static_log.js"></script>
-
-<script>
-// -------------------------------------------------------------
-// Service-Modus Checkbox initialisieren
-// -------------------------------------------------------------
-document.addEventListener("DOMContentLoaded", () => {
-    // Checkbox Zustand setzen
-    document.getElementById("serviceToggle").checked =
-        localStorage.getItem("service_enabled") === "1";
-
-    // Sidebar aktualisieren
-    updateServiceLinks();
-});
-
-// -------------------------------------------------------------
-// Checkbox Änderung speichern
-// -------------------------------------------------------------
-document.getElementById("serviceToggle").addEventListener("change", function() {
-    if (this.checked) {
-        localStorage.setItem("service_enabled", "1");
-    } else {
-        localStorage.removeItem("service_enabled");
-    }
-    updateServiceLinks();
-});
-</script>

@@ -1,13 +1,16 @@
 // =========================
 // PylontechMonitoring (ESP32-S)
-// Clean architecture with 2 tasks:
-//   - Task 1 (Core 0): Real‑time pipeline (UART + Parser)
-//   - Task 2 (Core 1): Non‑critical pipeline (Scheduler + MQTT + Webserver + WiFi)
+// Neue stabile Multi-Task-Architektur:
+//   - realtimeTask (Core 1): UART-FSM + Scheduler (NICHT Parser!)
+//   - parserTask   (Core 1): verarbeitet Frames aus frameQueue
+//   - mqttTask     (Core 0): MQTT loop
+//   - mqttPublishTask (Core 0): Publish-Queue
+//   - webTask      (Core 0): Webserver
+//   - wifiTask     (Core 0): WiFiManager + SystemManager
+//   - displayTask  (Core 0): Display
+//   - monitorTask  (Core 0): RAM-Log
 // =========================
 
-
-
-// ---- System Includes ----
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -15,197 +18,249 @@
 #include <SPIFFS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include "esp_heap_caps.h"
 
-// ---- Project Includes ----
 #include "esp_log.h"
 #include "config.h"
 #include "py_wifimanager.h"
-#include "wp_webserver.h"
+#include "wp_routes.h"
 #include "py_systemmanager.h"
 #include "py_uart.h"
 #include "py_scheduler.h"
-#include "py_parser_pwr.h"
-#include "py_parser_bat.h"
-#include "py_parser_stat.h"
+#include "py_parser.h"
 #include "py_log.h"
 #include "py_mqtt.h"
 #include "py_display.h"
 
-// =========================
-//  Global Data Structures
-// =========================
-
-// Magic Header – MUSS in der .bin stehen
+// Magic Header
 const char OTA_MAGIC_HEADER[] = "PYLONTECH_FW_V1";
 
-//PyDisplay display;
+// =========================
+// Queues / Handles
+// =========================
+QueueHandle_t frameQueue;      // UART → Parser
 
-// Global queue handle
-QueueHandle_t mqttQueue;
-QueueHandle_t rtWakeQueue;
+TaskHandle_t realtimeTaskHandle    = nullptr;
+TaskHandle_t parserTaskHandle      = nullptr;
+TaskHandle_t mqttTaskHandle        = nullptr;
+TaskHandle_t mqttPublishTaskHandle = nullptr;
+TaskHandle_t webTaskHandle         = nullptr;
+TaskHandle_t wifiTaskHandle        = nullptr;
+TaskHandle_t displayTaskHandle     = nullptr;
+TaskHandle_t monitorTaskHandle     = nullptr;
+TaskHandle_t systemTaskHandle      = nullptr;
 
-// frameQueue kommt aus config.cpp (extern in config.h deklariert)
-extern QueueHandle_t frameQueue;
-
-// Global objectsScheduler
-PyUart py_uart;
+// extern aus Modulen
+PyUart      py_uart;
 extern PyScheduler py_scheduler;
-extern PyMqtt py_mqtt;
+extern PyMqtt      py_mqtt;
+extern PyDisplay   display;
+
+// Parser-Flags/Buffer aus deinen Modulen (wie bisher)
+extern bool  parserHasData;
+extern float stackVoltAvg;
+extern float stackCurrSum;
+extern float stackTempMax;
+extern float stackSocAvg;
+
+extern bool      batParserHasData;
+extern int       batParserModuleIndex;
+//extern volatile bool batUseA;
+//extern BatBuffer batA;
+//extern BatBuffer batB;
+//extern std::vector<BatData> lastParsedBatCells;
+
+extern bool       statParserHasData;
+extern int        statParserModuleIndex;
+//extern volatile bool statUseA;
+//extern StatBuffer statA;
+//extern StatBuffer statB;
+
+// CPU-Load-Monitor
+volatile uint32_t idleCounterCore0 = 0;
+volatile uint32_t idleCounterCore1 = 0;
+
+volatile uint32_t lastIdleCore0 = 0;
+volatile uint32_t lastIdleCore1 = 0;
+
+
+extern "C" void vApplicationIdleHook(void) {
+    if (xPortGetCoreID() == 0) {
+        idleCounterCore0++;
+    } else {
+        idleCounterCore1++;
+    }
+}
+
+
 
 // =========================
- //  Task 1: Real‑Time Pipeline (Core 0)
- //  UART → Parser → Queue
- // =========================
+//  Task: realtimeTask (Core 1)
+//  UART-FSM + Scheduler
+//  KEIN PARSER, KEIN MQTT
+// =========================
 void realtimeTask(void* parameter) {
-
     for (;;) {
+        // UART-FSM (sammelt Frames ein und legt sie intern in lastRawFrame ab,
+        // pusht aber bereits in frameQueue – siehe neue py_uart.cpp)
+        py_uart.loop();
 
-        // 1) UART must be ready
-        if (!py_uart.isReady()) {
-            py_uart.begin(16, 17);
-            vTaskDelay(100);
-            continue;
-        }
+        // Scheduler
+        py_scheduler.loop();
 
-        // 2) If UART is busy, wait
-        if (py_uart.isBusy()) {
-            vTaskDelay(1);
-            continue;
-        }
-
-        // 3) Check if scheduler has a command
-        if (!py_scheduler.hasQueuedCommand()) {
-            vTaskDelay(1);
-            continue;
-        }
-
-        // 4) Pop next command
-        String cmd = py_scheduler.popNextCommand();
-        if (cmd.length() == 0) {
-            vTaskDelay(1);
-            continue;
-        }
-
-        Log(LOG_INFO, "Task1: executing command: " + cmd);
-
-        // 5) Execute UART command (blocking allowed)
-        bool ok = py_uart.sendCommand(cmd.c_str());
-
-        if (!ok || !py_uart.hasFrame()) {
-            Log(LOG_WARN, "Task1: UART failed for command: " + cmd);
-            py_scheduler.lastCommandFinished = millis();
-            vTaskDelay(1);
-            continue;
-        }
-
-        // 6) Get raw frame (Parser läuft in PyUart)
-        String raw = py_uart.getFrame();
-
-        // 7) Mark command finished
-        py_scheduler.lastCommandFinished =millis();
-
-        // 8) Small delay
-        vTaskDelay(1);
+        vTaskDelay(10);
     }
 }
 
 // =========================
-//  Task 2: Non‑Critical Pipeline (Core 1)
-//  Scheduler + MQTT + Webserver + WiFi
+//  Task: parserTask (Core 1)
+//  verarbeitet Frames aus frameQueue
 // =========================
-void noncriticalTask(void* parameter) {
-    MqttMessage msg;
 
-    unsigned long lastSched = 0;
-    unsigned long lastMqtt  = 0;
-    unsigned long lastWeb   = 0;
-    unsigned long lastSys   = 0;
-    unsigned long lastRam   = 0;
+
+// =========================
+//  Task: mqttTask (Core 0)
+//  nur MQTT loop()
+// =========================
+void mqttTask(void* parameter) {
+    for (;;) {
+        py_mqtt.loop();
+        vTaskDelay(100);
+    }
+}
+
+
+// =========================
+//  Task: WiFi (Core 0)
+// =========================
+void wifiTask(void* parameter) {
+    for (;;) {
+        WiFiManagerModule::loop();
+        vTaskDelay(100);
+    }
+}
+
+// =========================
+//  Task: Display (Core 0)
+// =========================
+void displayTask(void* parameter) {
+
+    static bool resetDoneToday = false;
 
     for (;;) {
-        unsigned long now = millis();
 
-        // 1) Scheduler
-        if (now - lastSched >= 20) {
-            lastSched = now;
-            py_scheduler.loop();
-        }
+        // Zeit holen
+        String now = config.getCurrentTimeString();  // "YYYY-MM-DD HH:MM:SS"
 
-        // 2) MQTT raw queue
-        while (xQueueReceive(mqttQueue, &msg, 0) == pdTRUE) {
-            py_mqtt.publishRaw(msg.topic, msg.payload);
-        }
-
-        // 3) MQTT internal
-        if (now - lastMqtt >= 20) {
-            lastMqtt = now;
-            py_mqtt.loop();
-        }
-
-        // 4) Webserver
-        if (now - lastWeb >= 20) {
-            lastWeb = now;
-            WebServerModule_handle();
-        }
-
-        // 5) WiFi + System
-        if (now - lastSys >= 20) {
-            lastSys = now;
-            WiFiManagerModule::loop();
-            SystemManager::loop();
-        }
-
-        // 6) RAM Debug
-        if (config.logDebug) {
-            if (now - lastRam >= 5000) {
-                lastRam = now;
-
-                multi_heap_info_t info;
-                heap_caps_get_info(&info, MALLOC_CAP_DEFAULT);
-
-                Log(LOG_DEBUG,
-                    String("RAM: free=") + info.total_free_bytes +
-                    " largest=" + info.largest_free_block +
-                    " min_free=" + info.minimum_free_bytes +
-                    " alloc=" + info.total_allocated_bytes
-                );
+        // Prüfen ob 03:00:00 erreicht wurde
+        if (now.endsWith("03:00:00")) {
+            if (!resetDoneToday) {
+                Log(LOG_WARN, "Display: nightly reset at 03:00");
+                display.reset();
+                resetDoneToday = true;
             }
         }
 
-        // Display-Update (NICHT im Debug-Block!)
-        if (parserHasData) {
-            auto pwr = pwrUseA ? pwrA : pwrB;
+        // Reset-Sperre um Mitternacht zurücksetzen
+        if (now.endsWith("00:00:00")) {
+            resetDoneToday = false;
+        }
 
-            if (!pwr.modules.empty()) {
-                auto &s = pwr.stack;
+        // Normale Display-Aktualisierung
+        display.syncFromGlobals();
+        display.syncHealth();
+        display.loop();
 
-                display.updatePwr(
-                    s.avgVoltage_mV,
-                    s.totalCurrent_mA,
-                    s.temperature,
-                    s.soc
-                );
+        vTaskDelay(500);
+    }
+}
+
+
+
+// =========================
+//  Task: Monitor (Core 0)
+// =========================
+void monitorTask(void* parameter) {
+    for (;;) {
+
+        // =========================
+        // RAM-Überwachung
+        // =========================
+        multi_heap_info_t dram;
+        heap_caps_get_info(&dram, MALLOC_CAP_DEFAULT);
+
+        size_t freeBytes    = dram.total_free_bytes;
+        size_t largestBlock = dram.largest_free_block;
+
+        if (largestBlock < 12000 || freeBytes < 30000) {
+            Log(LOG_WARN,
+                String("RAM LOW: free=") + freeBytes +
+                " largest=" + largestBlock
+            );
+        }
+
+        // =========================
+        // CPU-Last pro Core
+        // =========================
+        uint32_t idle0 = idleCounterCore0;
+        uint32_t idle1 = idleCounterCore1;
+
+        uint32_t diff0 = idle0 - lastIdleCore0;
+        uint32_t diff1 = idle1 - lastIdleCore1;
+
+        lastIdleCore0 = idle0;
+        lastIdleCore1 = idle1;
+
+        float idlePercent0 = (diff0 / 50000.0f) * 100.0f;
+        float idlePercent1 = (diff1 / 50000.0f) * 100.0f;
+
+        if (idlePercent0 > 100.0f) idlePercent0 = 100.0f;
+        if (idlePercent1 > 100.0f) idlePercent1 = 100.0f;
+
+        float cpuLoad0 = 100.0f - idlePercent0;
+        float cpuLoad1 = 100.0f - idlePercent1;
+
+        //Log(LOG_INFO,
+        //    "CPU Load Core0=" + String(cpuLoad0, 1) +
+        //    "% Core1=" + String(cpuLoad1, 1) + "%"
+        //);
+
+        // =========================
+        // TASK-MANAGER (Windows-Task-Manager für ESP32)
+        // =========================
+        char *taskBuffer = (char*) malloc(4096);
+        if (taskBuffer) {
+            memset(taskBuffer, 0, 4096);
+
+            vTaskGetRunTimeStats(taskBuffer);
+
+            if (config.logTaskManager) {
+                Log(LOG_INFO, "=== Task Manager ===");
+                Log(LOG_INFO, taskBuffer);
             }
+
+
+            free(taskBuffer);
+        } else {
+            Log(LOG_ERROR, "TaskManager: malloc failed");
         }
 
-        bool apMode = (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA);
-
-        display.updateWifi(
-            WiFi.status() == WL_CONNECTED,
-            WiFi.localIP().toString(),
-            WiFi.RSSI(),
-            apMode
-        );
-
-        // Display nur alle 500 ms aktualisieren
-        static unsigned long lastDisplay = 0;
-        if (now - lastDisplay >= 500) {
-            lastDisplay = now;
-            display.loop();
-        }
+        vTaskDelay(5000);
+    }
+}
 
 
-        vTaskDelay(1);
+void systemTask(void* parameter) {
+    for (;;) {
+        SystemManager::loop();
+        vTaskDelay(200);
+    }
+}
+
+void webTask(void* parameter) {
+    for (;;) {
+        // Webserver arbeitet event-basiert, daher nur kleine Pause
+        vTaskDelay(50);
     }
 }
 
@@ -219,31 +274,26 @@ void setup() {
 
     Log(LOG_INFO, "System booting...");
 
-    // Load configuration (deine bestehende load() kümmert sich um alles)
     config.load();
 
-    // Create MQTT queue
-    mqttQueue = xQueueCreate(
-        50,                      // number of buffered messages
-        sizeof(MqttMessage)      // size of each element
-    );
+    // Queues
+    frameQueue = xQueueCreate(10, sizeof(UartFrame));
 
-    if (mqttQueue == NULL) {
-        Log(LOG_ERROR, "MQTT Queue could not be created!");
+    if (!frameQueue) {
+        Log(LOG_ERROR, "frameQueue creation failed!");
     }
 
     // UART + Scheduler
-    py_uart.begin(16, 17);      // RX=16, TX=17
-    py_scheduler.begin(&py_uart);  
+    py_uart.begin(16, 17);
+    py_scheduler.begin(&py_uart);
 
     // Initial command
     py_scheduler.enqueue("pwr");
-    Log(LOG_INFO, "Scheduler: initial CMD_PWR enqueued");
 
-    // System Manager
+    // System
     SystemManager::begin();
 
-    // WiFi + OTA + NTP
+    // WiFi
     WiFiManagerModule::begin();
 
     // MQTT
@@ -258,51 +308,31 @@ void setup() {
     }
 
     // Webserver
-    WebServerModule_begin();
+    startHttpd();
 
-    // Webserver command callback
-    WebServerModule_setCommandCallback([](const String &cmd){
-        if (cmd == "pwr") {
-            py_scheduler.enqueue("pwr");
-            Log(LOG_INFO, "Web command: pwr");
-            return String("OK");
-        }
-        return String("UNKNOWN");
-    });
+    // Display
     display.begin();
-    display.setBrightness(150);   // z.B. ~80%
+    display.setBrightness(150);
 
+    // =========================
+    // Tasks starten
+    // =========================
 
+    xTaskCreatePinnedToCore(realtimeTask, "RT", 7168, NULL, 3, &realtimeTaskHandle, 1);
+    xTaskCreatePinnedToCore(parserTask,   "Parser", 7168, NULL, 2, &parserTaskHandle, 1);
 
-    // Start Task 1 (Real‑Time) on Core 1
-    xTaskCreatePinnedToCore(
-        realtimeTask,
-        "RealTime Task",
-        8192,
-        NULL,
-        2,          // higher priority
-        NULL,
-        1           // Core 1
-    );
-
-    // Start Task 2 (Non‑Critical + OTA + Webserver) auf Core 0
-    xTaskCreatePinnedToCore(
-        noncriticalTask,
-        "NonCritical Task",
-        8192,
-        NULL,
-        1,          // normal priority
-        NULL,
-        0           // Core 0
-    );
+    xTaskCreatePinnedToCore(wifiTask,    "WiFi",    4096, NULL, 3, &wifiTaskHandle, 0);
+    xTaskCreatePinnedToCore(mqttTask,    "MQTT",   12288, NULL, 1, &mqttTaskHandle, 0);
+    xTaskCreatePinnedToCore(displayTask, "Display", 3072, NULL, 1, &displayTaskHandle, 0);
+    xTaskCreatePinnedToCore(monitorTask, "Monitor", 3072, NULL, 1, &monitorTaskHandle, 0);
+    xTaskCreatePinnedToCore(systemTask, "System", 4096, NULL, 1, &systemTaskHandle, 0);
 
     Log(LOG_INFO, "Setup complete");
-}
+    }
 
 // =========================
 //  Arduino Loop (unused)
 // =========================
 void loop() {
-    // Empty – all logic moved to FreeRTOS tasks
     vTaskDelay(1000);
 }

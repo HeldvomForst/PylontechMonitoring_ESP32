@@ -1,12 +1,63 @@
 #pragma once
 #include <Arduino.h>
 #include <Preferences.h>
-#include <map>
-#include <vector>
+#include <map>          // ⚠ dynamic RAM (PWR + STAT config)
+#include <vector>       // ⚠ dynamic RAM (legacy parser structs)
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 
-// ---------------------------------------------------------
-// Timezone entry structure (Region → City → IANA → POSIX)
-// ---------------------------------------------------------
+// -------------------------------------------------------------
+// Mutexes
+// -------------------------------------------------------------
+extern portMUX_TYPE batMux;
+extern portMUX_TYPE statMux;
+
+// -------------------------------------------------------------
+// Global constants
+// -------------------------------------------------------------
+#define PWR_MAX_ROWS        32
+#define PWR_MAX_COLS        32
+#define BAT_MAX_COLS        20
+#define BAT_MAX_ROWS        20
+#define STAT_MAX_FIELDS     256
+
+#define PWR_WORKBUF_SIZE    8192
+#define BAT_WORKBUF_SIZE    4096
+#define STAT_WORKBUF_SIZE   4096
+
+// -------------------------------------------------------------
+// PWR table (RAM‑optimized)
+// -------------------------------------------------------------
+struct PwrTable {
+    int rows;
+    int cols;
+    const char* header[PWR_MAX_COLS];
+    const char* cell[PWR_MAX_ROWS][PWR_MAX_COLS];
+};
+
+// -------------------------------------------------------------
+// STAT table (RAM‑optimized)
+// -------------------------------------------------------------
+struct StatTable {
+    int count = 0;
+    const char* name[STAT_MAX_FIELDS];
+    const char* value[STAT_MAX_FIELDS];
+};
+
+// -------------------------------------------------------------
+// BAT table (RAM‑optimized)
+// -------------------------------------------------------------
+struct BatTable {
+    int cols = 0;
+    int rows = 0;
+
+    const char* header[BAT_MAX_COLS];
+    const char* cell[BAT_MAX_ROWS][BAT_MAX_COLS];
+};
+
+// -------------------------------------------------------------
+// Timezone (optional)
+// -------------------------------------------------------------
 struct TimezoneEntry {
     const char* region;
     const char* city;
@@ -14,29 +65,47 @@ struct TimezoneEntry {
     const char* posix;
 };
 
-
-String getTimezoneJson();
+String getTimezoneJson();                 // ⚠ optional
 String findPosixForTimezone(const String& tzName);
-extern const TimezoneEntry TIMEZONES[];
-extern const size_t TIMEZONE_COUNT;
-// Magic-Header-Deklaration
-extern const char OTA_MAGIC_HEADER[];
-// ---------------------------------------------------------
-// FieldConfig
-// ---------------------------------------------------------
+extern const TimezoneEntry TIMEZONES[];   // ⚠ optional
+extern const size_t TIMEZONE_COUNT;       // ⚠ optional
 
+extern const char OTA_MAGIC_HEADER[];     // ⚠ optional
+
+// -------------------------------------------------------------
+// PWR frame status
+// -------------------------------------------------------------
+extern volatile bool pwrFrameReady;
+extern int pwrTotalModules;
+extern int pwrCurrentModule;
+
+// -------------------------------------------------------------
+// FieldConfig (shared by PWR, BAT, STAT)
+// -------------------------------------------------------------
 struct FieldConfig {
-    String label;      // UI label
-    String display;    // NEW: MQTT display name (CamelCase)
+    String label;
+    String display;
     String factor;
     String unit;
     bool mqtt;
     bool send;
 };
 
-// ---------------------------------------------------------
-// Battery configuration
-// ---------------------------------------------------------
+// -------------------------------------------------------------
+// Global BAT field configuration (RAM‑optimized)
+// -------------------------------------------------------------
+extern FieldConfig batFields[BAT_MAX_COLS];
+extern int batFieldCount;
+
+// -------------------------------------------------------------
+// Global STAT field configuration (RAM‑optimized target)
+// -------------------------------------------------------------
+extern FieldConfig statFields[STAT_MAX_FIELDS];   
+extern int statFieldCount;                        
+
+// -------------------------------------------------------------
+// Battery configuration (intervals + flags)
+// -------------------------------------------------------------
 struct BatteryConfig {
     unsigned long intervalPwr  = 60000;
     unsigned long intervalBat  = 300000;
@@ -49,18 +118,16 @@ struct BatteryConfig {
 
     uint8_t maxModules = 16;
 
-    std::map<String, FieldConfig> fieldsPwr;
-    std::map<String, FieldConfig> fieldsBat;
-    std::map<String, FieldConfig> fieldsStat;
-
-    float cellDiffWarn = 0.010f;   // 10 mV Warnschwelle
-    float cellDiffError = 0.020f;  // 20 mV Fehlerschwelle
-
+    std::map<String, FieldConfig> fieldsPwr;   // ⚠ dynamic RAM (kept)
+    //std::map<String, FieldConfig> fieldsStat;  // ⚠ WILL BE REMOVED (STAT → static)
+    
+    float cellDiffWarn  = 0.020f;
+    float cellDiffError = 0.040f;
 };
 
-// ---------------------------------------------------------
+// -------------------------------------------------------------
 // MQTT configuration
-// ---------------------------------------------------------
+// -------------------------------------------------------------
 struct MqttConfig {
     bool enabled = false;
 
@@ -74,24 +141,23 @@ struct MqttConfig {
     String topicPwr   = "pwr";
     String topicBat   = "bat";
     String topicStat  = "stat";
-    String cellPrefix = "Cell";   // NEW: configurable cell prefix
+    String cellPrefix = "Cell";
 
     String mode = "active";
 };
 
-// ---------------------------------------------------------
-// Battery data structures (PWR / BAT / STAT)
-// ---------------------------------------------------------
+// -------------------------------------------------------------
+// Battery module + stack (PWR)
+// -------------------------------------------------------------
 struct BatteryModule {
     bool present = false;
-    int hub   = 0;   // 0 = no hub / stack mode
-    int stack = 0;   // 1..5 in hub mode
-    int index = 0;   // module index (Power/Module)
+    int index = 0;
     int voltage_mV = 0;
     int current_mA = 0;
     int temperature = 0;
     int soc = 0;
-    std::map<String, String> fields;
+
+    //std::map<String, String> fields;   // ⚠ dynamic RAM (legacy)
 };
 
 struct BatteryStack {
@@ -100,9 +166,6 @@ struct BatteryStack {
     int totalCurrent_mA = 0;
     int temperature = 0;
     int soc = 0;
-
-    int stackID = 0;   // <--- ADD THIS
-    int hubID = 0;     // <--- OPTIONAL, useful for Masterhub
 
     void reset() {
         batteryCount = 0;
@@ -113,116 +176,98 @@ struct BatteryStack {
     }
 };
 
-struct BatField {
+// -------------------------------------------------------------
+// PWR field table (RAM‑optimized)
+// -------------------------------------------------------------
+struct PwrField {
     String name;
-    String raw;
-    // int moduleIndex;  // optional
+    String display;
+    String factor;
+    String unit;
+    bool mqtt;
+    bool send;
 };
 
-struct BatData {
-    int moduleIndex;               // NEW: module number (1..N)
-    int cellIndex = -1;
-    std::vector<BatField> fields;
-};
+extern PwrField pwrFields[32];
+extern int pwrFieldCount;
 
-struct StatField {
-    String name;
-    String raw;
-};
+// -------------------------------------------------------------
+// ❌ Legacy BAT raw field (parser only)
+// -------------------------------------------------------------
+// struct BatField {
+//     String name;
+//     String raw;
+// };
 
-struct StatData {
-    int moduleIndex = -1;
-    std::vector<StatField> fields;
-};
+// -------------------------------------------------------------
+// ❌ Legacy BAT parsed data (parser only)
+// -------------------------------------------------------------
+// struct BatData {
+//     int moduleIndex;
+//     int cellIndex = -1;
+//     std::vector<BatField> fields;
+// };
 
-// ---------------------------------------------------------
-// ParsedData + Double Buffer
-// ---------------------------------------------------------
-struct ParsedData {
-    BatteryStack stack;
-    std::vector<BatteryModule> modules;
-    std::vector<BatData> batCells;
-    StatData stat;
-};
+// -------------------------------------------------------------
+// ❌ Legacy STAT raw field (parser only)
+// -------------------------------------------------------------
+// struct StatField {
+//     String name;
+//     String raw;
+// };
 
-//extern ParsedData bufferA;      //alt
-//extern ParsedData bufferB;      //alt
-//extern volatile bool useA;      //alt
+// -------------------------------------------------------------
+// ❌ Legacy STAT parsed data (parser only)
+// -------------------------------------------------------------
+// struct StatData {
+//     int moduleIndex = -1;
+//     std::vector<StatField> fields;
+// };
 
-struct PwrBuffer {
-    BatteryStack stack;
-    std::vector<BatteryModule> modules;
-};
+// -------------------------------------------------------------
+// ❌ Legacy ParsedData (not used anymore)
+// -------------------------------------------------------------
+// struct ParsedData {
+//     BatteryStack stack;
+//     std::vector<BatteryModule> modules;
+//     std::vector<BatData> batCells;
+//     StatData stat;
+// };
 
-struct BatBuffer {
-    std::vector<BatData> cells;
-};
+// -------------------------------------------------------------
+// ❌ Legacy double buffers (not used anymore)
+// -------------------------------------------------------------
+// struct PwrBuffer {
+//     BatteryStack stack;
+//     std::vector<BatteryModule> modules;
+// };
 
-struct StatBuffer {
-    StatData stat;
-};
+// struct BatBuffer {
+//     BatTable table;
+// };
 
-// Doppelbuffer für PWR
-extern PwrBuffer pwrA;
-extern PwrBuffer pwrB;
-extern volatile bool pwrUseA;
+// struct StatBuffer {
+//     StatData stat;
+// };
 
-// Doppelbuffer für BAT
-extern BatBuffer batA;
-extern BatBuffer batB;
-extern volatile bool batUseA;
-
-// Doppelbuffer für STAT
-extern StatBuffer statA;
-extern StatBuffer statB;
-extern volatile bool statUseA;
-
-
+// -------------------------------------------------------------
+// Parser result
+// -------------------------------------------------------------
 enum ParseResult {
     PARSE_OK,
     PARSE_FAIL,
     PARSE_IGNORED
 };
 
-#define MAX_MODULES 80
+#define MAX_MODULES 16
 
-enum FrameType {
-    FRAME_PWR,
-    FRAME_BAT,
-    FRAME_STAT
-};
-
-struct ParsedFrame {
-    FrameType type;
-    uint8_t index;
-
-    BatteryStack stack;
-    BatteryModule modules[MAX_MODULES];
-    BatData bat;
-    StatData stat;
-};
-// ---------------------------------------------------------
-// Battery operating mode (Stack / Hub / Unknown)
-// ---------------------------------------------------------
-enum class BatteryMode {
-    UNKNOWN = 0,
-    STACK   = 1,
-    HUB     = 2
-};
-
-// Global mode variable
-extern BatteryMode g_batteryMode;
-
-
-// ---------------------------------------------------------
-// Parser / MQTT Flags
-// ---------------------------------------------------------
+// -------------------------------------------------------------
+// ❌ Legacy parser flags (not used anymore)
+// -------------------------------------------------------------
 extern bool parserHasData;
-extern bool newParserData;
-
+// extern bool newParserData;
 extern bool batParserHasData;
 extern int  batParserModuleIndex;
-
 extern bool statParserHasData;
 extern int  statParserModuleIndex;
 
@@ -230,9 +275,9 @@ extern bool discoveryPwrNeeded;
 extern bool discoveryBatNeeded;
 extern bool discoveryStatNeeded;
 
-// ---------------------------------------------------------
+// -------------------------------------------------------------
 // AppConfig
-// ---------------------------------------------------------
+// -------------------------------------------------------------
 class AppConfig {
 public:
     String deviceName = "PylontechMonitor";
@@ -241,35 +286,37 @@ public:
     String wifiPass   = "";
     String apSSID     = "";
     String apPass     = "";
-    bool setupDone    = false;
+    bool   setupDone  = false;
 
-    bool useStaticIP = false;
-    String ipAddr     = "";
-    String subnetMask = "";
-    String gateway    = "";
-    String dns        = "";
+    bool   useStaticIP = false;
+    String ipAddr      = "";
+    String subnetMask  = "";
+    String gateway     = "";
+    String dns         = "";
 
+    // NTP (kept)
     String ntpServer = "pool.ntp.org";
-    bool manual_mode = false;
-    bool manual_dst = false;
-    bool use_gateway_ntp = true;
-    bool manual_ntp = false;
+    bool   manual_mode = false;
+    bool   manual_dst  = false;
+    bool   use_gateway_ntp = true;
+    bool   manual_ntp      = false;
     String manual_date = "";
     String manual_time = "";
 
     String timezone = "Europe/Berlin";
-    bool daylightSaving = true;
+    bool   daylightSaving = true;
     uint32_t ntpResyncInterval = 86400;
 
-    MqttConfig mqtt;
+    MqttConfig    mqtt;
     BatteryConfig battery;
 
-    String firmwareVersion = "1.2.1";
-    String currentTime     = "";
-    String lastPwrUpdate   = "";
-    uint16_t detectedModules = 0;
-
-    String lastMqttContact = "";
+    String   firmwareVersion  = "1.4.0";
+    String   currentTime      = "";
+    uint16_t detectedModules  = 0;
+    String   lastPwrUpdate    = "";
+    String   lastBatUpdate    = "";
+    String   lastStatUpdate    = "";
+    String   lastUartUpdate    = "";
 
     void load();
     void save();
@@ -292,55 +339,74 @@ public:
     void loadStatFields();
     void saveStatFields();
 
-    void clearNVS();
+    void clearNVS();           // kept
     void factoryDefaults();
-    void factoryReset();
+    void factoryReset();       // kept
 
-    String uptimeString();
-    String getCurrentTimeString();
-    bool isSystemTimeValid();
+    String uptimeString();     // kept
+    String getCurrentTimeString(); // kept
+    bool   isSystemTimeValid();    // kept
 
     bool logInfo  = true;
     bool logWarn  = true;
     bool logError = true;
     bool logDebug = false;
 
+    bool logTaskManager = false;
+
+    void saveDisplayBrightness();
+    uint8_t displayBrightness = 150;   // Default-Helligkeit
+
+
+
 private:
     String generateHostname();
-    void saveJsonChunked(const char* ns, const char* prefix, const String& json);
+    void   saveJsonChunked(const char* ns, const char* prefix, const String& json);
     String loadJsonChunked(const char* ns, const char* prefix);
+
+        // Cache für Health-Anzeige
+    String lastHealthColor;
+    String lastHealthOK;
+    String lastHealthWarn;
+    String lastHealthErr;
+    String lastHealthMsg;
 };
+
+// -------------------------------------------------------------
+// Health status (kept)
+// -------------------------------------------------------------
 struct ModuleHealth {
-    int index = 0;
-
-    float tempMax = 0;      // höchste Temperatur (Tempr oder Thigh)
-    float cellMin = 0;      // Vlow
-    float cellMax = 0;      // Vhigh
-    float cellDiff = 0;     // Delta
-
-    String strongestState = "Normal";  // stärkster Status
-    String status = "OK";              // OK / Warnung / Fehler
+    int         index;
+    float       tempMax;
+    float       cellMin;
+    float       cellMax;
+    float       cellDiff;
+    const char* strongestState;
+    const char* status;
 };
 
 struct HealthStatus {
-    std::vector<ModuleHealth> modules;
+    ModuleHealth modules[PWR_MAX_ROWS];
+    int          moduleCount = 0;
 
-    std::vector<int> okModules;
-    std::vector<int> warnModules;
-    std::vector<int> errorModules;
+    int okModules[PWR_MAX_ROWS];
+    int warnModules[PWR_MAX_ROWS];
+    int errorModules[PWR_MAX_ROWS];
 
-    std::vector<int> warnHistory;
-    std::vector<int> errorHistory;
+    int okCount    = 0;
+    int warnCount  = 0;
+    int errorCount = 0;
 
-    float stackCellMin = 0;
-    float stackCellMax = 0;
+    float stackCellMin  = 0;
+    float stackCellMax  = 0;
     float stackCellDiff = 0;
 
-    String strongestMessage = "OK";
-    String color = "green"; // green, yellow, red
+    const char* color            = "green";
+    const char* strongestMessage = "OK";
+
+    std::vector<int> warnHistory;   // kept
+    std::vector<int> errorHistory;  // kept
 };
 
 extern HealthStatus health;
-
-
-extern AppConfig config;
+extern AppConfig    config;

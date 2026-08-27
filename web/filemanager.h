@@ -15,12 +15,10 @@ button { padding: 6px 12px; margin-left: 10px; }
 </style>
 </head>
 <body>
-
 <h2>ESP32 File Manager</h2>
 
 <input type="file" id="file" multiple>
 <button onclick="upload()">Upload</button>
-
 <progress id="prog" value="0" max="100" style="display:none"></progress>
 <span id="progtext"></span>
 
@@ -34,13 +32,13 @@ function load() {
         let html = "<tr><th>Name</th><th>Size</th><th>Action</th></tr>";
         list.forEach(f => {
             html += `<tr>
-                <td>${f.name}</td>
-                <td>${f.size}</td>
-                <td>
-                    <a href="/fm/download?file=${encodeURIComponent(f.name)}">Download</a>
-                    <a href="#" onclick="del('${f.name}')">Delete</a>
-                </td>
-            </tr>`;
+<td>${f.name}</td>
+<td>${f.size}</td>
+<td>
+<a href="/fm/download?file=${encodeURIComponent(f.name)}">Download</a>
+<a href="#" onclick="del('${f.name}')">Delete</a>
+</td>
+</tr>`;
         });
         document.getElementById("tbl").innerHTML = html;
     });
@@ -60,12 +58,11 @@ async function upload() {
     for (let i = 0; i < files.length; i++) {
         let f = files[i];
 
-        let fd = new FormData();
-        fd.append("file", f, f.name);
-
         await new Promise((resolve, reject) => {
             let xhr = new XMLHttpRequest();
-            xhr.open("POST", "/fm/upload");
+            xhr.open("POST", "/fm/upload?file=" + encodeURIComponent(f.name));
+
+            xhr.setRequestHeader("Content-Type", "application/octet-stream");
 
             xhr.upload.onprogress = function(e) {
                 if (e.lengthComputable) {
@@ -76,12 +73,16 @@ async function upload() {
             };
 
             xhr.onload = function() {
-                if (xhr.status === 200) resolve();
-                else reject();
+                console.log("Upload", f.name, "Status:", xhr.status, "Response:", xhr.responseText);
+                resolve();
             };
 
-            xhr.onerror = reject;
-            xhr.send(fd);
+            xhr.onerror = function() {
+                console.error("Upload error", f.name);
+                reject();
+            };
+
+            xhr.send(f);
         });
     }
 
@@ -97,7 +98,6 @@ function del(name) {
 
 load();
 </script>
-
 </body>
 </html>
 )rawliteral";

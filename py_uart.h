@@ -1,40 +1,45 @@
 #pragma once
 #include <Arduino.h>
 
+extern volatile int consoleTicket;
+extern volatile int consoleTicketFrameReady;
+extern String consolePendingCommand;
+
+enum FrameType {
+    FRAME_UNKNOWN = 0,
+    FRAME_PWR,
+    FRAME_BAT,
+    FRAME_STAT
+};
+
+// Queue-Struct: KEINE Strings mehr!
+struct UartFrame {
+    FrameType type;
+    int       module;
+    int       commandId;   // Zuordnung Kommando → Frame
+};
+
 class PyUart {
 public:
     void begin(int rx, int tx);
-    void loop();   // intentionally empty
+    bool sendCommand(const char* cmd, int cmdId);
+    void loop();
 
-    // Blocking command → fills lastRawFrame
-    bool sendCommand(const char* cmd);
-
-    // Frame access for realtimeTask()
-    bool hasFrame() const { return frameReady; }
-    bool isFrameValid() const { return frameValid; }
-    String getFrame();   // returns lastRawFrame and clears frameReady
-
-    // Status
     bool isReady() const { return commReady; }
-    bool isBusy() const { return busy; }
-    String getLastCommand() const { return lastCommand; }
+    bool isBusy()  const { return busy; }
 
-    // Last frames for web UI
-    String getLastPwrFrame() const { return lastPwrFrame; }
-    String getLastBatFrame() const { return lastBatFrame; }
-    String getLastStatFrame() const { return lastStatFrame; }
+    String getLastCommand() const { return lastCommand; }
     String getLastRawFrame() const { return lastRawFrame; }
+
+    bool isFrameValid() const { return frameValid; }
 
 private:
     void switchBaud(int newRate);
     void wakeUpConsole();
-    int  readFromSerial();
-    bool sendCommandAndReadSerialResponse(const char* cmd);
 
-    bool commReady = false;
-    bool busy = false;
-    bool frameReady = false;
-    bool frameValid = false;
+    bool commReady   = false;
+    bool busy        = false;
+    bool frameValid  = false;
 
     int rxPin = -1;
     int txPin = -1;
@@ -42,7 +47,14 @@ private:
     String lastCommand;
     String lastRawFrame;
 
-    String lastPwrFrame;
-    String lastBatFrame;
-    String lastStatFrame;
+    int lastCommandId = 0;   // ID des zuletzt gesendeten Befehls
+
+    enum UartState {
+        UART_IDLE,
+        UART_WAITING,
+        UART_COLLECTING
+    };
+
+    UartState      state      = UART_IDLE;
+    unsigned long  cmdStart   = 0;
 };

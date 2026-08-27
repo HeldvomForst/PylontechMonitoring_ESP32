@@ -19,6 +19,29 @@ extern HealthStatus health;
 #define TFT_BL_CHANNEL  LEDC_CHANNEL_0
 #define TFT_BL_TIMER    LEDC_TIMER_0
 
+extern float stackVoltAvg;
+extern float stackCurrSum;
+extern float stackTempMax;
+extern float stackSocAvg;
+
+extern HealthStatus health;
+
+void PyDisplay::syncFromGlobals() {
+    // Stack-Werte aus Parser übernehmen
+    int v = (int)(stackVoltAvg * 1000.0f);   // V → mV
+    int c = (int)(stackCurrSum * 1000.0f);   // A → mA
+    int t = (int)(stackTempMax * 1000.0f);   // °C → mC
+    int s = (int)(stackSocAvg + 0.5f);       // % → int
+
+    updatePwr(v, c, t, s);
+}
+
+void PyDisplay::syncHealth() {
+    // Health wird direkt aus dem globalen health-Objekt gelesen
+    needsRedraw = true;
+}
+
+
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 PyDisplay display;
 
@@ -72,9 +95,10 @@ void PyDisplay::begin() {
     ch.channel        = TFT_BL_CHANNEL;
     ch.intr_type      = LEDC_INTR_DISABLE;
     ch.timer_sel      = TFT_BL_TIMER;
-    ch.duty           = 255;   // volle Helligkeit
+    ch.duty           = config.displayBrightness;
     ch.hpoint         = 0;
     ledc_channel_config(&ch);
+    setBrightness(config.displayBrightness);
 
     // SPI starten
     SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI);
@@ -181,73 +205,81 @@ void PyDisplay::drawValues() {
     // ---------------------------------------------------------
     // HEALTH BLOCK (Mitte des Displays)
     // ---------------------------------------------------------
-
-    // ---------------------------------------------------------
-    // HEALTH BLOCK (nur neu zeichnen, wenn sich etwas geändert hat)
-    // ---------------------------------------------------------
     extern HealthStatus health;
 
-    // Strings für Vergleich erzeugen
-    String okStr = "";
-    for (int m : health.okModules) okStr += String(m) + " ";
+    // Strings nur aus gültigen Einträgen aufbauen
+    String okStr;
+    okStr.reserve(64);
+    for (int i = 0; i < health.okCount; i++) {
+        okStr += String(health.okModules[i]);
+        okStr += " ";
+    }
 
-    String warnStr = "";
-    for (int m : health.warnModules) warnStr += String(m) + " ";
+    String warnStr;
+    warnStr.reserve(32);
+    for (int i = 0; i < health.warnCount; i++) {
+        warnStr += String(health.warnModules[i]);
+        warnStr += " ";
+    }
 
-    String errStr = "";
-    for (int m : health.errorModules) errStr += String(m) + " ";
+    String errStr;
+    errStr.reserve(32);
+    for (int i = 0; i < health.errorCount; i++) {
+        errStr += String(health.errorModules[i]);
+        errStr += " ";
+    }
 
     bool changed =
-        (lastHealthColor != health.color) ||
-        (lastHealthOK != okStr) ||
-        (lastHealthWarn != warnStr) ||
-        (lastHealthErr != errStr) ||
-        (lastHealthMsg != health.strongestMessage);
+        (lastHealthColor != String(health.color)) ||
+        (lastHealthOK    != okStr) ||
+        (lastHealthWarn  != warnStr) ||
+        (lastHealthErr   != errStr) ||
+        (lastHealthMsg   != String(health.strongestMessage));
 
     if (changed) {
-        // Hintergrundfarbe
-        uint16_t bg =
-            (health.color == "green")  ? ST77XX_BLACK :
-            (health.color == "yellow") ? ST77XX_YELLOW :
-                                        ST77XX_RED;
 
-        // Block löschen
+        // Hintergrundfarbe je nach Health-Farbe
+        uint16_t bg =
+            (strcmp(health.color, "green")  == 0) ? ST77XX_BLACK :
+            (strcmp(health.color, "yellow") == 0) ? ST77XX_YELLOW :
+                                                    ST77XX_RED;
+
         tft.fillRect(0, 60, 160, 45, bg);
 
         // Textfarbe
         uint16_t fg =
-            (health.color == "red" || health.color == "yellow")
+            (strcmp(health.color, "red") == 0 || strcmp(health.color, "yellow") == 0)
                 ? ST77XX_BLACK
                 : ST77XX_GREEN;
 
         tft.setTextColor(fg);
         tft.setTextSize(1);
 
-        // Zeile 1
+        // Zeile 1: OK
         tft.setCursor(2, 62);
         tft.print("OK: ");
         tft.print(okStr);
 
-        // Zeile 2
+        // Zeile 2: Warn
         tft.setCursor(2, 74);
         tft.print("Warn: ");
         tft.print(warnStr);
 
-        // Zeile 3
+        // Zeile 3: Err
         tft.setCursor(2, 86);
         tft.print("Err: ");
         tft.print(errStr);
 
-        // Zeile 4
+        // Zeile 4: stärkste Meldung
         tft.setCursor(2, 98);
         tft.print(health.strongestMessage);
 
         // Cache aktualisieren
-        lastHealthColor = health.color;
-        lastHealthOK = okStr;
-        lastHealthWarn = warnStr;
-        lastHealthErr = errStr;
-        lastHealthMsg = health.strongestMessage;
+        lastHealthColor = String(health.color);
+        lastHealthOK    = okStr;
+        lastHealthWarn  = warnStr;
+        lastHealthErr   = errStr;
+        lastHealthMsg   = String(health.strongestMessage);
     }
 
 
@@ -262,7 +294,7 @@ void PyDisplay::drawValues() {
     if (wifiAPMode) {
         tft.printf("AP 192.168.4.1");
     } else {
-        tft.printf("%s (%ddBm)", wifiIP.c_str(), wifiRSSI);
+        tft.printf("%s ", wifiIP.c_str());
     }
 
     // MQTT
@@ -277,4 +309,12 @@ void PyDisplay::loop() {
     if (!needsRedraw) return;
     drawValues();
     needsRedraw = false;
+}
+
+void PyDisplay::reset() {
+    tft.initR(INITR_BLACKTAB);
+    tft.setRotation(1);
+    tft.fillScreen(ST77XX_BLACK);
+    drawStaticUI();
+    needsRedraw = true;
 }

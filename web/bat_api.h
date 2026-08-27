@@ -1,151 +1,164 @@
 #pragma once
+#include "api_core.h"
 #include <ArduinoJson.h>
-#include "../wp_webserver.h"
-#include "../py_parser_bat.h"
 #include "../config.h"
+#include "../py_parser.h"
 
-static void handleApiBatCells();
+extern AppConfig config;
+extern BatTable  batTable;
+extern bool      discoveryBatNeeded;
 
-static void registerBatAPI() {
-    server.on("/api/bat/cells", HTTP_GET, handleApiBatCells);
-}
+extern FieldConfig batFields[BAT_MAX_COLS];
+extern int         batFieldCount;
 
-static void handleApiBatCells() {
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "application/json", "");
+// ------------------------------------------------------------
+// GET /api/bat/cells
+// ------------------------------------------------------------
+static esp_err_t api_bat_cells(httpd_req_t *req) {
 
-    server.sendContent("{");
+    DynamicJsonDocument doc(4096);
 
     // CONFIG
-    server.sendContent("\"config\":{");
-    server.sendContent("\"intervalBat\":");
-    server.sendContent(String(config.battery.intervalBat));
-    server.sendContent(",");
-    server.sendContent("\"enableBat\":");
-    server.sendContent(config.battery.enableBat ? "true" : "false");
-    server.sendContent("},");
+    JsonObject cfg = doc.createNestedObject("config");
+    cfg["intervalBat"] = config.battery.intervalBat;
+    cfg["enableBat"]   = config.battery.enableBat;
 
     // MQTT
-    server.sendContent("\"mqtt\":{");
-    server.sendContent("\"topicBat\":\"");
-    server.sendContent(config.mqtt.topicBat);
-    server.sendContent("\",");
-    server.sendContent("\"cellPrefix\":\"");
-    server.sendContent(config.mqtt.cellPrefix);
-    server.sendContent("\"");
-    server.sendContent("},");
+    JsonObject mqtt = doc.createNestedObject("mqtt");
+    mqtt["topicBat"]   = config.mqtt.topicBat;
+    mqtt["cellPrefix"] = config.mqtt.cellPrefix;
+
+    BatTable& tbl = batTable;
 
     // HEADERS
-    server.sendContent("\"headers\":[");
-    for (size_t i = 0; i < lastParsedBat.fields.size(); i++) {
-        if (i > 0) server.sendContent(",");
-        server.sendContent("\"");
-        server.sendContent(lastParsedBat.fields[i].name);
-        server.sendContent("\"");
+    JsonArray headers = doc.createNestedArray("headers");
+    for (int c = 0; c < tbl.cols; c++) {
+        headers.add(tbl.header[c] ? tbl.header[c] : "");
     }
-    server.sendContent("],");
 
-    // VALUES
-    server.sendContent("\"values\":[");
-    for (size_t i = 0; i < lastParsedBat.fields.size(); i++) {
-        if (i > 0) server.sendContent(",");
-        server.sendContent("\"");
-        server.sendContent(lastParsedBat.fields[i].raw);
-        server.sendContent("\"");
-    }
-    server.sendContent("],");
-
-    // FIELDS (nur NVS-Felder!)
-    server.sendContent("\"fields\":[");
-
-    bool first = true;
-    for (auto &pf : lastParsedBat.fields) {
-
-        // Nur Felder aus NVS zurückgeben
-        if (!config.battery.fieldsBat.count(pf.name)) {
-            continue;
+    // VALUES (nur 1 Modul)
+    JsonArray values = doc.createNestedArray("values");
+    if (tbl.rows > 0) {
+        for (int c = 0; c < tbl.cols; c++) {
+            const char* v = tbl.cell[0][c];
+            values.add(v ? v : "");
         }
-
-        const FieldConfig &f = config.battery.fieldsBat.at(pf.name);
-
-        DynamicJsonDocument doc(256);
-        JsonObject o = doc.to<JsonObject>();
-
-        o["name"]        = pf.name;
-        o["display"]     = f.display;
-        o["factor"]      = f.factor;
-        o["unit"]        = f.unit;
-        o["sendMQTT"]    = f.mqtt;
-        o["sendPayload"] = f.send;
-        o["raw"]         = pf.raw;
-        o["value"]       = pf.raw;
-
-        String tmp;
-        serializeJson(o, tmp);
-
-        if (!first) server.sendContent(",");
-        first = false;
-
-        server.sendContent(tmp);
     }
 
-    server.sendContent("]");
+    // FIELDS (NVS-Konfiguration)
+    JsonArray fields = doc.createNestedArray("fields");
 
-    server.sendContent("}");
+    if (tbl.rows > 0) {
+        for (int c = 0; c < tbl.cols; c++) {
+
+            const char* name = tbl.header[c];
+            const char* raw  = tbl.cell[0][c];
+            if (!name) continue;
+
+            String key(name);
+
+            // passenden FieldConfig suchen
+            int idx = -1;
+            for (int i = 0; i < batFieldCount; i++) {
+                if (batFields[i].label == key) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) continue;
+
+            const FieldConfig& fc = batFields[idx];
+
+            JsonObject o = fields.createNestedObject();
+            o["name"]        = key;
+            o["display"]     = fc.display;
+            o["factor"]      = fc.factor;
+            o["unit"]        = fc.unit;
+            o["sendMQTT"]    = fc.mqtt;
+            o["sendPayload"] = fc.send;
+            o["raw"]         = raw ? raw : "";
+            o["value"]       = raw ? raw : "";
+        }
+    }
+
+    String out;
+    serializeJson(doc, out);
+    apiJson(req, out);
+    return ESP_OK;
 }
 
-static void handleApiBatSet() {
+// ------------------------------------------------------------
+// POST /api/bat/set
+// ------------------------------------------------------------
+static esp_err_t api_bat_set(httpd_req_t *req) {
 
-    if (!server.hasArg("plain")) {
-        server.send(400, "text/plain", "Missing body");
-        return;
+    String body = apiGetBody(req);
+
+    Log(LOG_INFO, String("BAT-API: Received JSON length = ") + body.length());
+    Log(LOG_INFO, String("BAT-API: Received JSON = ") + body);
+
+    if (body.isEmpty()) {
+        apiError(req, 400, "Missing body");
+        return ESP_OK;
     }
 
-    DynamicJsonDocument req(4096);
-    if (deserializeJson(req, server.arg("plain"))) {
-        server.send(400, "text/plain", "Invalid JSON");
-        return;
+    DynamicJsonDocument doc(4096);
+    if (deserializeJson(doc, body)) {
+        apiError(req, 400, "Invalid JSON");
+        return ESP_OK;
     }
 
     // CONFIG
-    config.battery.intervalBat = req["config"]["intervalBat"] | config.battery.intervalBat;
-    config.battery.enableBat   = req["config"]["enableBat"]   | config.battery.enableBat;
+    config.battery.intervalBat = doc["config"]["intervalBat"] | config.battery.intervalBat;
+    //config.battery.enableBat   = doc["config"]["enableBat"]   | config.battery.enableBat;
 
     // MQTT
-    config.mqtt.topicBat   = req["mqtt"]["topicBat"]   | config.mqtt.topicBat;
-    config.mqtt.cellPrefix = req["mqtt"]["cellPrefix"] | config.mqtt.cellPrefix;
+    config.mqtt.topicBat   = doc["mqtt"]["topicBat"]   | config.mqtt.topicBat;
+    config.mqtt.cellPrefix = doc["mqtt"]["cellPrefix"] | config.mqtt.cellPrefix;
 
-    // FIELDS
-    JsonArray arr = req["fields"];
+    // FIELDS: RAM-Tabelle komplett neu aufbauen
+    JsonArray arr = doc["fields"];
+
+    batFieldCount = 0;  // alte RAM-Felder verwerfen
+
     for (JsonObject f : arr) {
+
+        if (batFieldCount >= BAT_MAX_COLS) break;
 
         String name = f["name"] | "";
         if (name.length() == 0) continue;
 
-        if (!config.battery.fieldsBat.count(name)) {
-            FieldConfig fc;
-            fc.label   = name;
-            fc.display = name;
-            fc.factor  = "1";
-            fc.unit    = "";
-            fc.mqtt    = false;
-            fc.send    = false;
-            config.battery.fieldsBat[name] = fc;
-        }
+        FieldConfig& fc = batFields[batFieldCount++];
 
-        FieldConfig &fc = config.battery.fieldsBat[name];
+        // Label = technischer Name vom Parser/BMS
+        fc.label   = name;
 
-        fc.display = f["display"]     | fc.display;
-        fc.label   = f["display"]     | fc.label;
-        fc.factor  = f["factor"]      | fc.factor;
-        fc.unit    = f["unit"]        | fc.unit;
+        // Display = Anzeigename (variabel)
+        fc.display = f["display"] | name;
+
+        fc.factor  = f["factor"]  | String("1");
+        fc.unit    = f["unit"]    | String("");
         fc.mqtt    = f["sendMQTT"]    | false;
         fc.send    = f["sendPayload"] | false;
     }
 
-	discoveryBatNeeded  = true;
+    Log(LOG_INFO, String("BAT-API: batFieldCount after rebuild = ") + batFieldCount);
 
-    config.save();
+    discoveryBatNeeded = true;
+    config.save();   // ruft saveBatFields(), das NVS-Chunks löscht und neu schreibt
 
-    server.send(200, "text/plain", "BAT settings saved");
+    apiText(req, "BAT settings saved");
+    return ESP_OK;
+}
+
+// ------------------------------------------------------------
+// Registrierung
+// ------------------------------------------------------------
+inline void registerBatAPI() {
+
+    httpd_uri_t r1 = { "/api/bat/cells", HTTP_GET,  api_bat_cells, NULL };
+    httpd_uri_t r2 = { "/api/bat/set",   HTTP_POST, api_bat_set,   NULL };
+
+    httpd_register_uri_handler(server, &r1);
+    httpd_register_uri_handler(server, &r2);
 }

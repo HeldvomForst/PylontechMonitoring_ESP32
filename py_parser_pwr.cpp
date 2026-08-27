@@ -1,732 +1,410 @@
-#include "py_parser_pwr.h"
-#include "py_log.h"
+#include <Arduino.h>
 #include "config.h"
-#include "py_uart.h"
+#include "py_parser.h"
+#include "py_log.h"
 
-#include <cctype>
-#include <algorithm>
-#include <map>
+// Work buffer for copied strings
+static char work[PWR_WORKBUF_SIZE];
+static int  wp = 0;
 
-// UART instance
-extern PyUart py_uart;
+// Global tables and status
+extern PwrTable     pwrTable;
+extern HealthStatus health;
+extern AppConfig    config;
 
-// Global parser data for Web UI
-BatteryStack lastParsedStack;
-std::vector<BatteryModule> lastParsedModules;
-std::vector<String> lastParserHeader;
-std::vector<String> lastParserValues;
+// MQTT trigger
+extern volatile bool pwrFrameReady;
+extern int           pwrTotalModules;
+extern int           pwrCurrentModule;
 
-// New: hub/stack result
-ParsedHubData lastParsedHub;
+// Stack values
+extern float stackVoltAvg;
+extern float stackCurrSum;
+extern float stackSocAvg;
+extern float stackTempMax;
+extern int   stackBatCount;
 
-// External battery mode (must exist somewhere in your code)
-extern BatteryMode g_batteryMode;
-
-// ---------------------------------------------------------
-// Helper: trim whitespace
-// ---------------------------------------------------------
-static String trimWS(const String& s) {
-    String r = s;
-    r.trim();
-    return r;
-}
-
-// ---------------------------------------------------------
-// Helper: split by whitespace
-// ---------------------------------------------------------
-static std::vector<String> splitWS(const String& line) {
-    std::vector<String> out;
-    int start = 0;
-
-    while (start < line.length()) {
-        while (start < line.length() && isspace((unsigned char)line[start])) start++;
-        if (start >= line.length()) break;
-
-        int end = start;
-        while (end < line.length() && !isspace((unsigned char)line[end])) end++;
-
-        out.push_back(line.substring(start, end));
-        start = end;
+// -------------------------------------------------------------
+// Copy a string into the work buffer (zero‑terminated)
+// -------------------------------------------------------------
+static const char* copyToWork(const char* s, int len) {
+    if (wp + len + 1 >= PWR_WORKBUF_SIZE) {
+        Log(LOG_ERROR, "PWR parser: work buffer overflow");
+        return nullptr;
     }
-    return out;
+    memcpy(&work[wp], s, len);
+    work[wp + len] = '\0';
+    const char* ptr = &work[wp];
+    wp += len + 1;
+    return ptr;
 }
 
-// ---------------------------------------------------------
-// Extract @ ... $$ frame
-// ---------------------------------------------------------
-static bool extractFrame(const String& raw, String& frame) {
-    int start = raw.indexOf('@');
-    int end   = raw.indexOf("$$");
-
-    if (start < 0 || end < 0 || end <= start)
-        return false;
-
-    frame = raw.substring(start + 1, end);
-    return true;
+// -------------------------------------------------------------
+// Copy Arduino String into work buffer
+// -------------------------------------------------------------
+static const char* copyStringToWork(const String& s) {
+    return copyToWork(s.c_str(), s.length());
 }
 
-// ---------------------------------------------------------
-// Forward declarations for mode-specific parsers
-// ---------------------------------------------------------
-static ParseResult parsePwrFrameStackMode(const String& raw,
-                                          BatteryStack& stackOut,
-                                          std::vector<BatteryModule>& modulesOut);
+// -------------------------------------------------------------
+// Keep history list limited to max entries
+// -------------------------------------------------------------
+static void pushHistoryLimited(std::vector<int>& list, int value) {
+    const size_t MAX_HISTORY = 50;
+    list.push_back(value);
+    if (list.size() > MAX_HISTORY)
+        list.erase(list.begin());
+}
 
-static ParseResult parsePwrFrameHubMode(const String& raw,
-                                        BatteryStack& stackOut,
-                                        std::vector<BatteryModule>& modulesOut);
-
-// ---------------------------------------------------------
-// Main PWR parser (mode dispatcher)
-// ---------------------------------------------------------
-ParseResult parsePwrFrame(const String& raw,
-                          BatteryStack& stackOut,
-                          std::vector<BatteryModule>& modulesOut)
+// -------------------------------------------------------------
+// Main PWR frame parser
+// -------------------------------------------------------------
+ParseResult parsePwrFrame(const String& raw)
 {
-    // Only handle frames that belong to "pwr"
-    if (py_uart.getLastCommand() != "pwr") {
-        Log(LOG_DEBUG, "PWR parser: ignoring frame (last command was '" + py_uart.getLastCommand() + "')");
-        return PARSE_IGNORED;
-    }
+    Log(LOG_INFO, "PWR parser: raw length=" + String(raw.length()));
 
-    // Only handle valid frames
-    if (!py_uart.isFrameValid()) {
-        Log(LOG_WARN, "PWR parser: skipping invalid frame");
-        return PARSE_FAIL;
-    }
+    // Reset work buffer and table
+    wp = 0;
+    pwrTable.rows = 0;
+    pwrTable.cols = 0;
 
-    modulesOut.clear();
-    stackOut.reset();
-    lastParsedHub.hubs.clear();
+    // Reset health
+    health.moduleCount = 0;
+    health.okCount     = 0;
+    health.warnCount   = 0;
+    health.errorCount  = 0;
 
-    Log(LOG_INFO, "PWR parser: raw frame received, length=" + String(raw.length()));
-
-    // Dispatch by battery mode
-    if (g_batteryMode == BatteryMode::STACK) {
-        return parsePwrFrameStackMode(raw, stackOut, modulesOut);
-    }
-    else if (g_batteryMode == BatteryMode::HUB) {
-        return parsePwrFrameHubMode(raw, stackOut, modulesOut);
-    }
-    else {
-        Log(LOG_WARN, "PWR parser: unknown battery mode, skipping");
-        return PARSE_FAIL;
-    }
-}
-
-// ---------------------------------------------------------
-// Common: split frame into lines and header
-// ---------------------------------------------------------
-static bool splitFrameLinesAndHeader(const String& rawFrame,
-                                     std::vector<String>& lines,
-                                     std::vector<String>& header)
-{
-    lines.clear();
-    header.clear();
-
-    int pos = 0;
-    while (true) {
-        int nl = rawFrame.indexOf('\n', pos);
-        if (nl < 0) {
-            String last = trimWS(rawFrame.substring(pos));
-            if (last.length() > 0) lines.push_back(last);
-            break;
-        }
-        String line = trimWS(rawFrame.substring(pos, nl));
-        if (line.length() > 0) lines.push_back(line);
-        pos = nl + 1;
-    }
-
-    if (lines.size() < 2) {
-        Log(LOG_WARN, "PWR parser: too few lines");
-        return false;
-    }
-
-    header = splitWS(lines[0]);
-    if (header.size() < 3) {
-        Log(LOG_WARN, "PWR parser: header too small");
-        return false;
-    }
-
-    lastParserHeader = header;
-    lastParserValues.clear();
-    return true;
-}
-
-// ---------------------------------------------------------
-// STACK MODE PARSER (original behavior, minimal changes)
-// ---------------------------------------------------------
-static ParseResult parsePwrFrameStackMode(const String& raw,
-                                          BatteryStack& stackOut,
-                                          std::vector<BatteryModule>& modulesOut)
-{
-    String frame;
-    if (!extractFrame(raw, frame)) {
-        Log(LOG_WARN, "PWR parser (STACK): no valid @ ... $$ frame found");
-        return PARSE_FAIL;
-    }
-
-    std::vector<String> lines;
-    std::vector<String> header;
-    if (!splitFrameLinesAndHeader(frame, lines, header)) {
-        return PARSE_FAIL;
-    }
-
-    int baseIndex = -1;
-    int timeIndex = -1;
-
-    for (size_t h = 0; h < header.size(); h++) {
-        if (header[h] == "Base.St" || header[h] == "Base") {
-            baseIndex = h;
-        }
-        if (header[h] == "Time") {
-            timeIndex = h;
-        }
-    }
-
-    for (size_t i = 1; i < lines.size(); i++) {
-
-        std::vector<String> cols = splitWS(lines[i]);
-        if (cols.empty()) continue;
-
-        // Merge date + time if split
-        if (timeIndex >= 0 && cols.size() > (size_t)timeIndex + 1) {
-            String datePart = cols[timeIndex];
-            String timePart = cols[timeIndex + 1];
-
-            bool looksLikeDate = (datePart.indexOf('-') > 0 || datePart.indexOf('/') > 0);
-            bool looksLikeTime = (timePart.indexOf(':') > 0);
-
-            if (looksLikeDate && looksLikeTime) {
-                cols[timeIndex] = datePart + " " + timePart;
-                cols.erase(cols.begin() + timeIndex + 1);
-            }
-        }
-
-        if (cols.size() < header.size()) continue;
-
-        // Absent → end of list
-        if (baseIndex >= 0 && cols[baseIndex] == "Absent") {
-            Log(LOG_INFO, "PWR parser (STACK): Absent detected at line " + String(i));
-            break;
-        }
-
-        // First valid line for Web UI
-        if (lastParserValues.empty()) {
-            lastParserValues = cols;
-        }
-
-        BatteryModule mod;
-        mod.present = true;
-        mod.hub = 0;
-        mod.stack = 0;
-
-        for (size_t c = 0; c < header.size(); c++) {
-            const String& col = header[c];
-            const String& value = cols[c];
-
-            mod.fields[col] = value;
-
-            if (col == "Power" || col == "Battery") {
-                mod.index = value.toInt();
-            }
-            else if (col == "Volt") {
-                mod.voltage_mV = value.toInt();
-            }
-            else if (col == "Curr") {
-                mod.current_mA = value.toInt();
-            }
-            else if (col == "Tempr") {
-                mod.temperature = value.toInt();
-            }
-            else if (col == "Coulomb" || col == "SOC") {
-                String v = value;
-                v.replace("%", "");
-                mod.soc = v.toInt();
-            }
-        }
-
-        bool plausible = true;
-        plausible &= (mod.index >= 1 && mod.index <= 32);
-        plausible &= (mod.voltage_mV > 10000 && mod.voltage_mV < 60000);
-        plausible &= (mod.temperature > 1000 && mod.temperature < 60000);
-        plausible &= (mod.soc >= 1 && mod.soc <= 100);
-
-        if (!plausible) {
-            Log(LOG_WARN, "PWR parser (STACK): skipping implausible module line " + String(i));
-            continue;
-        }
-
-        modulesOut.push_back(mod);
-    }
-
-    if (modulesOut.empty()) {
-        Log(LOG_WARN, "PWR parser (STACK): no modules parsed");
-        return PARSE_FAIL;
-    }
-
-    // Stack calculation (unchanged logic)
-    int count = modulesOut.size();
-    stackOut.batteryCount = count;
-    config.detectedModules = count;
-
-    long sumVolt = 0;
-    long sumCurr = 0;
-    int minSoc = 999;
-    int maxTemp = -999;
-
-    for (auto& m : modulesOut) {
-        sumVolt += m.voltage_mV;
-        sumCurr += m.current_mA;
-
-        if (m.soc < minSoc) minSoc = m.soc;
-        if (m.temperature > maxTemp) maxTemp = m.temperature;
-    }
-
-    stackOut.avgVoltage_mV   = sumVolt / count;
-    stackOut.totalCurrent_mA = sumCurr;
-    stackOut.soc             = minSoc;
-    stackOut.temperature     = maxTemp;
-
-    config.lastPwrUpdate = config.getCurrentTimeString();
-
-    // Web UI data
-    lastParsedStack   = stackOut;
-    lastParsedModules = modulesOut;
-
-    // Double buffer
-    PwrBuffer* target = pwrUseA ? &pwrB : &pwrA;
-    target->stack   = stackOut;
-    target->modules = modulesOut;
-    pwrUseA = !pwrUseA;
-
-    // Health evaluation (unchanged, uses modulesOut)
-    health.modules.clear();
-    health.okModules.clear();
-    health.warnModules.clear();
-    health.errorModules.clear();
-
-    health.stackCellMin = 0;
-    health.stackCellMax = 0;
+    health.stackCellMin  = 999999.0f;
+    health.stackCellMax  = -999999.0f;
     health.stackCellDiff = 0;
 
-    auto pushLimited = [&](std::vector<int> &list, int value) {
-        if (!list.empty() && list.back() == value)
-            return;
-        list.push_back(value);
-        const size_t MAX_HISTORY = 50;
-        if (list.size() > MAX_HISTORY)
-            list.erase(list.begin());
-    };
+    health.color            = "green";
+    health.strongestMessage = "OK";
 
-    for (auto &m : modulesOut) {
-        if (!m.present) continue;
+    // Reset stack values
+    stackVoltAvg  = 0;
+    stackCurrSum  = 0;
+    stackSocAvg   = 0;
+    stackTempMax  = -9999.0f;
+    stackBatCount = 0;
 
-        ModuleHealth mh;
-        mh.index = m.index;
+    // Copy raw frame into local buffer
+    static char frameBuf[PWR_WORKBUF_SIZE];
+    int len = raw.length();
+    if (len >= (int)sizeof(frameBuf)) {
+        Log(LOG_ERROR, "PWR parser: frame too large");
+        return PARSE_FAIL;
+    }
+    memcpy(frameBuf, raw.c_str(), len);
+    frameBuf[len] = '\0';
 
-        int t1 = m.temperature;
-        int t2 = m.fields["Thigh"].toInt();
+    // Locate '@' and '$$'
+    char* start = strchr(frameBuf, '@');
+    if (!start) {
+        Log(LOG_ERROR, "PWR parser: no '@' found");
+        return PARSE_FAIL;
+    }
+    start++;
 
-        if (t1 > 0) mh.tempMax = t1 / 1000.0f;
-        if (t2 > 0 && t2 > t1) mh.tempMax = t2 / 1000.0f;
+    char* end = strstr(start, "$$");
+    if (!end || end <= start) {
+        Log(LOG_ERROR, "PWR parser: no '$$' found");
+        return PARSE_FAIL;
+    }
+    *end = '\0';
 
-        String vlow  = m.fields["Vlow"];
-        String vhigh = m.fields["Vhigh"];
+    // ---------------------------------------------------------
+    // Split into lines
+    // ---------------------------------------------------------
+    char* linePtr[PWR_MAX_ROWS + 1];
+    int   lineCount = 0;
 
-        if (vlow != "-" && vhigh != "-") {
-            int low  = vlow.toInt();
-            int high = vhigh.toInt();
+    char* p = start;
+    while (*p && lineCount < PWR_MAX_ROWS + 1) {
 
-            if (low > 1000 && low < 5000 && high > 1000 && high < 5000) {
-                mh.cellMin = low / 1000.0f;
-                mh.cellMax = high / 1000.0f;
-                mh.cellDiff = mh.cellMax - mh.cellMin;
+        while (*p == '\r' || *p == '\n') p++;
+        if (!*p) break;
 
-                if (health.stackCellMin == 0 || mh.cellMin < health.stackCellMin)
-                    health.stackCellMin = mh.cellMin;
+        char* lineStart = p;
 
-                if (mh.cellMax > health.stackCellMax)
-                    health.stackCellMax = mh.cellMax;
+        while (*p && *p != '\r' && *p != '\n') p++;
+        if (*p) {
+            *p = '\0';
+            p++;
+        }
+
+        // Trim left
+        char* s = lineStart;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s) continue;
+
+        // Trim right
+        char* e = s + strlen(s) - 1;
+        while (e > s && (*e == ' ' || *e == '\t')) {
+            *e = '\0';
+            e--;
+        }
+
+        if (*s)
+            linePtr[lineCount++] = s;
+    }
+
+    if (lineCount < 2) {
+        Log(LOG_ERROR, "PWR parser: too few lines");
+        return PARSE_FAIL;
+    }
+
+    // ---------------------------------------------------------
+    // Parse header line
+    // ---------------------------------------------------------
+    char* headerLine = linePtr[0];
+    char* colPtr[PWR_MAX_COLS];
+    int   colCount = 0;
+
+    {
+        char* t = headerLine;
+        while (*t && colCount < PWR_MAX_COLS) {
+            while (*t == ' ' || *t == '\t') t++;
+            if (!*t) break;
+
+            char* tokStart = t;
+            while (*t && *t != ' ' && *t != '\t') t++;
+
+            if (*t) {
+                *t = '\0';
+                t++;
+            }
+            colPtr[colCount++] = tokStart;
+        }
+    }
+
+    pwrTable.cols = colCount;
+    for (int c = 0; c < colCount; c++)
+        pwrTable.header[c] = copyToWork(colPtr[c], strlen(colPtr[c]));
+
+    // Detect important columns by name
+    int colVolt = -1, colCurr = -1, colTemp = -1, colCoul = -1;
+    int colVlow = -1, colVhigh = -1;
+    int colTime = -1;
+
+    for (int c = 0; c < colCount; c++) {
+        if (strcmp(colPtr[c], "Volt")    == 0) colVolt   = c;
+        if (strcmp(colPtr[c], "Curr")    == 0) colCurr   = c;
+        if (strcmp(colPtr[c], "Tempr")   == 0) colTemp   = c;
+        if (strcmp(colPtr[c], "Coulomb") == 0) colCoul   = c;
+        if (strcmp(colPtr[c], "Vlow")    == 0) colVlow   = c;
+        if (strcmp(colPtr[c], "Vhigh")   == 0) colVhigh  = c;
+        if (strcmp(colPtr[c], "Time")    == 0) colTime   = c;   // NEW
+    }
+
+    // ---------------------------------------------------------
+    // Parse data rows
+    // ---------------------------------------------------------
+    for (int li = 1; li < lineCount; li++) {
+
+        char* line = linePtr[li];
+
+        // Tokenize row
+        int   nCols = 0;
+        char* t = line;
+
+        while (*t && nCols < PWR_MAX_COLS) {
+            while (*t == ' ' || *t == '\t') t++;
+            if (!*t) break;
+
+            char* tokStart = t;
+            while (*t && *t != ' ' && *t != '\t') t++;
+
+            if (*t) {
+                *t = '\0';
+                t++;
+            }
+            colPtr[nCols++] = tokStart;
+        }
+
+        if (nCols < 2) continue;
+        if (!isdigit((unsigned char)colPtr[0][0])) continue;
+
+        // -----------------------------------------------------
+        // Coulomb fix: merge "%" into Coulomb
+        // -----------------------------------------------------
+        if (colCoul >= 0 && colCoul + 1 < nCols) {
+            if (strcmp(colPtr[colCoul + 1], "%") == 0) {
+
+                size_t len = strlen(colPtr[colCoul]);
+                if (len + 1 < 16) {
+                    colPtr[colCoul][len]   = '%';
+                    colPtr[colCoul][len+1] = '\0';
+                }
+
+                for (int k = colCoul + 1; k < nCols - 1; k++)
+                    colPtr[k] = colPtr[k + 1];
+
+                nCols--;
             }
         }
 
-        auto bad = [&](const String &s) {
-            if (s.length() == 0) return false;
-            if (s == "-") return false;
-            if (s == "Normal" || s == "normal") return false;
-            return true;
+        // -----------------------------------------------------
+        // Time fix: merge date + time into one column
+        // -----------------------------------------------------
+        if (colTime >= 0 && colTime + 1 < nCols) {
+
+            if (strchr(colPtr[colTime + 1], ':')) {
+
+                size_t len1 = strlen(colPtr[colTime]);
+                size_t len2 = strlen(colPtr[colTime + 1]);
+
+                if (len1 + 1 + len2 < 64) {
+                    colPtr[colTime][len1] = ' ';
+                    memcpy(colPtr[colTime] + len1 + 1,
+                           colPtr[colTime + 1],
+                           len2 + 1);
+                }
+
+                for (int k = colTime + 1; k < nCols - 1; k++)
+                    colPtr[k] = colPtr[k + 1];
+
+                nCols--;
+            }
+        }
+
+        // -----------------------------------------------------
+        // Helper to convert column to float
+        // -----------------------------------------------------
+        auto getFloat = [&](int idx) -> float {
+            if (idx < 0 || idx >= nCols) return 0.0f;
+            char* s = colPtr[idx];
+            if (!s || !*s) return 0.0f;
+
+            char* p = s;
+            while (*p) {
+                if (*p == '%') { *p = '\0'; break; }
+                p++;
+            }
+            return strtof(s, nullptr);
         };
 
-        bool modError = false;
-        bool modWarn  = false;
+        // Extract values
+        float volt  = getFloat(colVolt)  / 1000.0f;
+        float curr  = getFloat(colCurr)  / 1000.0f;
+        float temp  = getFloat(colTemp)  / 1000.0f;
+        float soc   = getFloat(colCoul);
+        float vlow  = getFloat(colVlow)  / 1000.0f;
+        float vhigh = getFloat(colVhigh) / 1000.0f;
 
-        String volt = m.fields["Volt.St"];
-        String curr = m.fields["Curr.St"];
-        String temp = m.fields["Temp.St"];
-        String sys  = m.fields["SysAlarm.St"];
+        if (volt < 10 || volt > 60) continue;
 
-        if (bad(sys)) modError = true;
+        // Stack aggregation
+        stackVoltAvg += volt;
+        stackCurrSum += curr;
+        stackSocAvg  += soc;
 
-        if (bad(volt)) modWarn = true;
-        if (bad(curr)) modWarn = true;
-        if (bad(temp)) modWarn = true;
+        if (temp > stackTempMax) stackTempMax = temp;
+        if (vlow  < health.stackCellMin) health.stackCellMin = vlow;
+        if (vhigh > health.stackCellMax) health.stackCellMax = vhigh;
 
-        if (mh.cellDiff > config.battery.cellDiffWarn)
-            modWarn = true;
+        stackBatCount++;
 
-        if (mh.cellDiff > config.battery.cellDiffError)
-            modError = true;
-
-        if (modError) {
-            mh.status = "Fehler";
-            health.errorModules.push_back(m.index);
-            pushLimited(health.errorHistory, m.index);
+        // Fill module health
+        if (health.moduleCount < 32) {
+            ModuleHealth& m = health.modules[health.moduleCount];
+            m.index    = health.moduleCount + 1;
+            m.tempMax  = temp;
+            m.cellMin  = vlow;
+            m.cellMax  = vhigh;
+            m.cellDiff = vhigh - vlow;
+            m.status   = "OK";
+            m.strongestState = "OK";
+            health.moduleCount++;
         }
-        else if (modWarn) {
-            mh.status = "Warnung";
-            health.warnModules.push_back(m.index);
-            pushLimited(health.warnHistory, m.index);
-        }
-        else {
-            mh.status = "OK";
-            health.okModules.push_back(m.index);
-        }
 
-        health.modules.push_back(mh);
+        // Fill table row
+        int row = pwrTable.rows;
+        if (row < PWR_MAX_ROWS) {
+            for (int c = 0; c < pwrTable.cols && c < nCols; c++)
+                pwrTable.cell[row][c] = copyToWork(colPtr[c], strlen(colPtr[c]));
+            pwrTable.rows++;
+        }
     }
 
+    if (stackBatCount == 0) {
+        Log(LOG_ERROR, "PWR parser: no valid modules");
+        return PARSE_FAIL;
+    }
+
+    // Finalize stack values
+    stackVoltAvg /= stackBatCount;
+    stackSocAvg  /= stackBatCount;
     health.stackCellDiff = health.stackCellMax - health.stackCellMin;
 
-    if (!health.errorModules.empty()) {
-        health.color = "red";
-        health.strongestMessage = "Fehler in Modulen";
+    // ---------------------------------------------------------
+    // Health evaluation
+    // ---------------------------------------------------------
+    health.okCount    = 0;
+    health.warnCount  = 0;
+    health.errorCount = 0;
+
+    float warnTh  = config.battery.cellDiffWarn;
+    float errorTh = config.battery.cellDiffError;
+
+    for (int i = 0; i < health.moduleCount; i++) {
+
+        ModuleHealth& m = health.modules[i];
+        float d = m.cellDiff;
+
+        if (d >= errorTh) {
+            m.status         = "Error";
+            m.strongestState = "Error";
+            health.errorModules[health.errorCount++] = m.index;
+            pushHistoryLimited(health.errorHistory, m.index);
+        }
+        else if (d >= warnTh) {
+            m.status         = "Warn";
+            m.strongestState = "Warn";
+            health.warnModules[health.warnCount++] = m.index;
+            pushHistoryLimited(health.warnHistory, m.index);
+        }
+        else {
+            m.status         = "OK";
+            m.strongestState = "OK";
+            health.okModules[health.okCount++] = m.index;
+        }
     }
-    else if (!health.warnModules.empty()) {
-        health.color = "yellow";
-        health.strongestMessage = "Warnung in Modulen";
+
+    // Stack color
+    if (health.errorCount > 0) {
+        health.color            = "red";
+        health.strongestMessage = "Fehler";
+    }
+    else if (health.warnCount > 0) {
+        health.color            = "yellow";
+        health.strongestMessage = "Warnung";
     }
     else {
-        health.color = "green";
+        health.color            = "green";
         health.strongestMessage = "OK";
     }
 
-    Log(LOG_INFO, "PWR parser (STACK): parsed " + String(count) + " modules");
-    return PARSE_OK;
-}
+    // MQTT trigger
+    pwrTotalModules  = pwrTable.rows;
+    pwrCurrentModule = 0;
+    pwrFrameReady    = true;
+
+    // Save detected module count
+    int modules = pwrTable.rows;
+    if (modules > config.battery.maxModules)
+        modules = config.battery.maxModules;
+
+    config.detectedModules = modules;
+
+    Log(LOG_INFO,
+        "PWR parser OK: header=" + String(pwrTable.cols) +
+        " cols, rows=" + String(pwrTable.rows) +
+        ", detectedModules=" + String(config.detectedModules) +
+        ", stackDelta=" + String(health.stackCellDiff, 3) +
+        ", ok=" + String(health.okCount) +
+        ", warn=" + String(health.warnCount) +
+        ", err=" + String(health.errorCount));
 
-// ---------------------------------------------------------
-// HUB MODE PARSER (Hub + Masterhub)
-// ---------------------------------------------------------
-static ParseResult parsePwrFrameHubMode(const String& raw,
-                                        BatteryStack& stackOut,
-                                        std::vector<BatteryModule>& modulesOut)
-{
-    String frame;
-    if (!extractFrame(raw, frame)) {
-        Log(LOG_WARN, "PWR parser (HUB): no valid @ ... $$ frame found");
-        return PARSE_FAIL;
-    }
-
-    std::vector<String> lines;
-    std::vector<String> header;
-    if (!splitFrameLinesAndHeader(frame, lines, header)) {
-        return PARSE_FAIL;
-    }
-
-    int colAddress = -1;
-    int colStack   = -1;
-    int colModule  = -1;
-    int timeIndex  = -1;
-
-    for (size_t h = 0; h < header.size(); h++) {
-        if (header[h] == "Address") colAddress = h;
-        if (header[h] == "Stack")   colStack   = h;
-        if (header[h] == "Module")  colModule  = h;
-        if (header[h] == "Time")    timeIndex  = h;
-    }
-
-    if (colStack < 0 || colModule < 0) {
-        Log(LOG_WARN, "PWR parser (HUB): missing Stack/Module columns");
-        return PARSE_FAIL;
-    }
-
-    // hubID -> stackID -> modules
-    std::map<int, std::map<int, std::vector<BatteryModule>>> hubMap;
-
-    for (size_t i = 1; i < lines.size(); i++) {
-
-        std::vector<String> cols = splitWS(lines[i]);
-        if (cols.empty()) continue;
-
-        // Merge date + time if split
-        if (timeIndex >= 0 && cols.size() > (size_t)timeIndex + 1) {
-            String datePart = cols[timeIndex];
-            String timePart = cols[timeIndex + 1];
-
-            bool looksLikeDate = (datePart.indexOf('-') > 0 || datePart.indexOf('/') > 0);
-            bool looksLikeTime = (timePart.indexOf(':') > 0);
-
-            if (looksLikeDate && looksLikeTime) {
-                cols[timeIndex] = datePart + " " + timePart;
-                cols.erase(cols.begin() + timeIndex + 1);
-            }
-        }
-
-        if (cols.size() < header.size()) continue;
-
-        if (lastParserValues.empty()) {
-            lastParserValues = cols;
-        }
-
-        int hubID    = (colAddress >= 0) ? cols[colAddress].toInt() : 1;
-        int stackID  = cols[colStack].toInt();
-        int moduleID = cols[colModule].toInt();
-
-        BatteryModule mod;
-        mod.present = true;
-        mod.hub     = hubID;
-        mod.stack   = stackID;
-        mod.index   = moduleID;
-
-        for (size_t c = 0; c < header.size(); c++) {
-            const String& col   = header[c];
-            const String& value = cols[c];
-
-            mod.fields[col] = value;
-
-            if (col == "Volt") {
-                mod.voltage_mV = value.toInt();
-            }
-            else if (col == "Curr") {
-                mod.current_mA = value.toInt();
-            }
-            else if (col == "Tempr") {
-                mod.temperature = value.toInt();
-            }
-            else if (col == "Coulomb" || col == "SOC") {
-                String v = value;
-                v.replace("%", "");
-                mod.soc = v.toInt();
-            }
-        }
-
-        bool plausible = true;
-        plausible &= (stackID  >= 1 && stackID  <= 5);
-        plausible &= (moduleID >= 1 && moduleID <= 16);
-        plausible &= (mod.voltage_mV > 10000 && mod.voltage_mV < 60000);
-        plausible &= (mod.temperature > 1000 && mod.temperature < 60000);
-        plausible &= (mod.soc >= 1 && mod.soc <= 100);
-
-        if (!plausible) {
-            Log(LOG_WARN, "PWR parser (HUB): skipping implausible module line " + String(i));
-            continue;
-        }
-
-        hubMap[hubID][stackID].push_back(mod);
-        modulesOut.push_back(mod);
-    }
-
-    if (modulesOut.empty()) {
-        Log(LOG_WARN, "PWR parser (HUB): no modules parsed");
-        return PARSE_FAIL;
-    }
-
-    // Sort modules by hub, stack, module
-    std::sort(modulesOut.begin(), modulesOut.end(),
-        [](const BatteryModule& a, const BatteryModule& b) {
-            if (a.hub   != b.hub)   return a.hub   < b.hub;
-            if (a.stack != b.stack) return a.stack < b.stack;
-            return a.index < b.index;
-        });
-
-    // Build per-stack BatteryStack and overall stackOut
-    lastParsedHub.hubs.clear();
-    BatteryStack total;
-    total.reset();
-
-    int totalModules = 0;
-
-    for (auto &hubPair : hubMap) {
-        int hubID = hubPair.first;
-        for (auto &stackPair : hubPair.second) {
-            int stackID = stackPair.first;
-            auto &mods  = stackPair.second;
-
-            if (mods.empty()) continue;
-
-            BatteryStack s;
-            s.reset();
-            s.stackID = stackID;
-            s.batteryCount = mods.size();
-
-            long sumVolt = 0;
-            long sumCurr = 0;
-            int minSoc   = 999;
-            int maxTemp  = -999;
-
-            for (auto &m : mods) {
-                sumVolt += m.voltage_mV;
-                sumCurr += m.current_mA;
-                if (m.soc < minSoc) minSoc = m.soc;
-                if (m.temperature > maxTemp) maxTemp = m.temperature;
-            }
-
-            s.avgVoltage_mV   = sumVolt / mods.size();
-            s.totalCurrent_mA = sumCurr;
-            s.soc             = minSoc;
-            s.temperature     = maxTemp;
-
-            lastParsedHub.hubs[hubID][stackID] = s;
-
-            // Accumulate into total
-            totalModules += s.batteryCount;
-            total.batteryCount   += s.batteryCount;
-            total.avgVoltage_mV  += s.avgVoltage_mV;
-            total.totalCurrent_mA += s.totalCurrent_mA;
-
-            if (total.temperature == 0 || s.temperature > total.temperature)
-                total.temperature = s.temperature;
-
-            if (total.soc == 0 || (s.soc > 0 && s.soc < total.soc))
-                total.soc = s.soc;
-        }
-    }
-
-    if (totalModules > 0) {
-        int stackCount = 0;
-        for (auto &hubPair : lastParsedHub.hubs)
-            stackCount += hubPair.second.size();
-
-        if (stackCount > 0)
-            total.avgVoltage_mV /= stackCount;
-    }
-
-    stackOut = total;
-    config.detectedModules = totalModules;
-    config.lastPwrUpdate = config.getCurrentTimeString();
-
-    // Web UI data
-    lastParsedStack   = stackOut;
-    lastParsedModules = modulesOut;
-
-    // Double buffer
-    PwrBuffer* target = pwrUseA ? &pwrB : &pwrA;
-    target->stack   = stackOut;
-    target->modules = modulesOut;
-    pwrUseA = !pwrUseA;
-
-    // Health evaluation (reuse same logic, now across all modules)
-    health.modules.clear();
-    health.okModules.clear();
-    health.warnModules.clear();
-    health.errorModules.clear();
-
-    health.stackCellMin = 0;
-    health.stackCellMax = 0;
-    health.stackCellDiff = 0;
-
-    auto pushLimited = [&](std::vector<int> &list, int value) {
-        if (!list.empty() && list.back() == value)
-            return;
-        list.push_back(value);
-        const size_t MAX_HISTORY = 50;
-        if (list.size() > MAX_HISTORY)
-            list.erase(list.begin());
-    };
-
-    for (auto &m : modulesOut) {
-        if (!m.present) continue;
-
-        ModuleHealth mh;
-        mh.index = m.index;
-
-        int t1 = m.temperature;
-        int t2 = m.fields["Thigh"].toInt();
-
-        if (t1 > 0) mh.tempMax = t1 / 1000.0f;
-        if (t2 > 0 && t2 > t1) mh.tempMax = t2 / 1000.0f;
-
-        String vlow  = m.fields["Vlow"];
-        String vhigh = m.fields["Vhigh"];
-
-        if (vlow != "-" && vhigh != "-") {
-            int low  = vlow.toInt();
-            int high = vhigh.toInt();
-
-            if (low > 1000 && low < 5000 && high > 1000 && high < 5000) {
-                mh.cellMin = low / 1000.0f;
-                mh.cellMax = high / 1000.0f;
-                mh.cellDiff = mh.cellMax - mh.cellMin;
-
-                if (health.stackCellMin == 0 || mh.cellMin < health.stackCellMin)
-                    health.stackCellMin = mh.cellMin;
-
-                if (mh.cellMax > health.stackCellMax)
-                    health.stackCellMax = mh.cellMax;
-            }
-        }
-
-        auto bad = [&](const String &s) {
-            if (s.length() == 0) return false;
-            if (s == "-") return false;
-            if (s == "Normal" || s == "normal") return false;
-            return true;
-        };
-
-        bool modError = false;
-        bool modWarn  = false;
-
-        String volt = m.fields["Volt.St"];
-        String curr = m.fields["Curr.St"];
-        String temp = m.fields["Temp.St"];
-        String sys  = m.fields["SysAlarm.St"];
-
-        if (bad(sys)) modError = true;
-
-        if (bad(volt)) modWarn = true;
-        if (bad(curr)) modWarn = true;
-        if (bad(temp)) modWarn = true;
-
-        if (mh.cellDiff > config.battery.cellDiffWarn)
-            modWarn = true;
-
-        if (mh.cellDiff > config.battery.cellDiffError)
-            modError = true;
-
-        if (modError) {
-            mh.status = "Fehler";
-            health.errorModules.push_back(m.index);
-            pushLimited(health.errorHistory, m.index);
-        }
-        else if (modWarn) {
-            mh.status = "Warnung";
-            health.warnModules.push_back(m.index);
-            pushLimited(health.warnHistory, m.index);
-        }
-        else {
-            mh.status = "OK";
-            health.okModules.push_back(m.index);
-        }
-
-        health.modules.push_back(mh);
-    }
-
-    health.stackCellDiff = health.stackCellMax - health.stackCellMin;
-
-    if (!health.errorModules.empty()) {
-        health.color = "red";
-        health.strongestMessage = "Fehler in Modulen";
-    }
-    else if (!health.warnModules.empty()) {
-        health.color = "yellow";
-        health.strongestMessage = "Warnung in Modulen";
-    }
-    else {
-        health.color = "green";
-        health.strongestMessage = "OK";
-    }
-
-    Log(LOG_INFO, "PWR parser (HUB): parsed " + String(totalModules) + " modules");
     return PARSE_OK;
 }

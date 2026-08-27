@@ -1,29 +1,31 @@
 <div class="content">
 
-    <h2>Basiswerte</h2>
+    <h2 id="base_title"></h2>
 
     <div class="conn-grid-3">
 
         <!-- Temperatur -->
         <div class="conn-box">
-            <div class="conn-header">Temperatureinstellung</div>
+            <div class="conn-header" id="base_temp_header"></div>
             <div class="conn-body">
                 <label>
                     <input id="use_fahrenheit" type="checkbox">
-                    Temperatur in Fahrenheit anzeigen
+                    <span id="base_temp_label"></span>
                 </label>
             </div>
         </div>
 
         <!-- MQTT -->
         <div class="conn-box">
-            <div class="conn-header">MQTT Subtopics</div>
+            <div class="conn-header" id="base_mqtt_header"></div>
             <div class="conn-body">
-                <label>Topic PWR<br>
+                <label>
+                    <span id="base_topic_pwr"></span><br>
                     <input id="topic_pwr" type="text">
                 </label>
                 <br><br>
-                <label>Topic Stack<br>
+                <label>
+                    <span id="base_topic_stack"></span><br>
                     <input id="topic_stack" type="text">
                 </label>
             </div>
@@ -31,9 +33,10 @@
 
         <!-- Intervall -->
         <div class="conn-box">
-            <div class="conn-header">Abfrageintervall</div>
+            <div class="conn-header" id="base_interval_header"></div>
             <div class="conn-body">
-                <label>PWR (Sekunden)<br>
+                <label>
+                    <span id="base_interval_pwr"></span><br>
                     <input id="interval_pwr" type="number" min="1">
                 </label>
             </div>
@@ -43,18 +46,18 @@
 
     <!-- Tabelle -->
     <div class="conn-box">
-        <div class="conn-header">PWR Parser Fields</div>
+        <div class="conn-header" id="base_table_header"></div>
         <div class="conn-body">
             <table class="conn-table">
                 <thead>
                     <tr>
-                        <th>Feldname</th>
-                        <th>Anzeigename</th>
-                        <th>Rohdaten</th>
-                        <th>Faktor</th>
-                        <th>Einheit</th>
-                        <th>MQTT</th>
-                        <th>Send</th>
+                        <th id="base_col_field"></th>
+                        <th id="base_col_display"></th>
+                        <th id="base_col_raw"></th>
+                        <th id="base_col_factor"></th>
+                        <th id="base_col_unit"></th>
+                        <th id="base_col_mqtt"></th>
+                        <th id="base_col_send"></th>
                     </tr>
                 </thead>
                 <tbody id="pwr_table"></tbody>
@@ -62,7 +65,7 @@
         </div>
     </div>
 
-    <button class="btn-save" onclick="pwrSave()">Speichern</button>
+    <button class="btn-save" id="base_btn_save" onclick="pwrSave()"></button>
 
 </div>
 

@@ -17,7 +17,7 @@ function pwrLoad() {
             // Abschnitt 3
             document.getElementById("interval_pwr").value = j.config.intervalPwr / 1000;
 
-            // Tabelle
+            // Tabelle NUR tbody leeren
             let table = document.getElementById("pwr_table");
             table.innerHTML = "";
 
@@ -46,7 +46,7 @@ function pwrLoad() {
                     send    = saved[name].sendPayload;
                 } 
                 else {
-                    // AUTODETECT
+                    // AUTODETECT (unverändert)
                     let n = name.toLowerCase();
                     let r = raw.toLowerCase();
 
@@ -82,7 +82,7 @@ function pwrLoad() {
                     }
                 }
 
-                // Tabelle rendern
+                // Tabelle rendern (nur tbody)
                 let row = document.createElement("tr");
                 row.innerHTML = `
                     <td>${name}</td>
@@ -122,8 +122,12 @@ function pwrLoad() {
                 document.getElementById("mqtt_" + name).checked = mqtt;
                 document.getElementById("send_" + name).checked = send;
             }
+
+            // 🔥 WICHTIG: Übersetzungen jetzt erneut anwenden
+            applyLanguage();
         });
 }
+
 document.addEventListener("change", function(e) {
     let target = e.target;
 

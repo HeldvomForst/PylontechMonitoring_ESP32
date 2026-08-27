@@ -9,11 +9,16 @@ public:
     void loop();
 
     void updatePwr(int volt_mV, int curr_mA, int temp_mC, int soc);
-
     void updateWifi(bool connected, const String &ip, int rssi, bool apMode);
     void updateMqtt(bool connected, const String &server);
 
-    void setBrightness(uint8_t value); // 0–255
+    void setBrightness(uint8_t value);
+
+    // NEU: Werte aus Parser-Globals übernehmen
+    void syncFromGlobals();
+    void syncHealth();
+    void reset();
+
 
 
 private:
@@ -34,12 +39,13 @@ private:
     // MQTT
     bool mqttConnected = false;
     String mqttServer = "";
+
+    // Health Cache
     String lastHealthColor = "";
     String lastHealthOK = "";
     String lastHealthWarn = "";
     String lastHealthErr = "";
     String lastHealthMsg = "";
-
 
     bool needsRedraw = true;
 };

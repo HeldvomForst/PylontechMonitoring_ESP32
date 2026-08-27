@@ -1,44 +1,44 @@
 <div class="content">
 
-    <h2>Statistic</h2>
+<h2 id="stat_title"></h2>
 
-    <div class="conn-grid-3">
+<div class="conn-grid-3">
 
-        <div class="conn-box">
-            <div class="conn-header">STAT Parser</div>
-            <div class="conn-body">
-                <label>
-                    <input id="enable_stat" type="checkbox">
-                </label>
-            </div>
-        </div>
-
-        <div class="conn-box">
-            <div class="conn-header">MQTT Subtopic</div>
-            <div class="conn-body">
-                <label>Topic STAT<br>
-                    <input id="topic_stat" type="text">
-                </label>
-            </div>
-        </div>
-
-        <div class="conn-box">
-            <div class="conn-header">Abfrageintervall</div>
-            <div class="conn-body">
-                <label>STAT (Sekunden)<br>
-                    <input id="interval_stat" type="number">
-                </label>
-            </div>
-        </div>
-
+<div class="conn-box">
+    <div class="conn-header" id="stat_parser_header"></div>
+    <div class="conn-body">
+        <label>
+            <input id="enable_stat" type="checkbox">
+            <span id="stat_enable_label"></span>
+        </label>
     </div>
+</div>
 
-    <div id="stat_groups"></div>
-	
-	<table id="stat_table"></table>
-	<br>
-	<button onclick="saveStatSettings()">Speichern</button>
+<div class="conn-box">
+    <div class="conn-header" id="stat_mqtt_header"></div>
+    <div class="conn-body">
+        <label id="stat_topic_label"></label><br>
+        <input id="topic_stat" type="text">
+    </div>
+</div>
 
+<div class="conn-box">
+    <div class="conn-header" id="stat_interval_header"></div>
+    <div class="conn-body">
+        <label id="stat_interval_label"></label><br>
+        <input id="interval_stat" type="number">
+    </div>
+</div>
+
+</div>
+
+<div id="stat_groups"></div>
+
+<table id="stat_table"></table>
+
+<br>
+
+<button onclick="saveStatSettings()" id="stat_btn_save"></button>
 
 </div>
 

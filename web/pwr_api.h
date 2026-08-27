@@ -1,172 +1,160 @@
 #pragma once
+#include "api_core.h"
 #include <ArduinoJson.h>
-#include "../wp_webserver.h"
-#include "../py_parser_pwr.h"
+#include "../py_parser.h"
 #include "../config.h"
 
-static void handleApiPwrBase();
+extern AppConfig config;
+extern PwrTable pwrTable;
+extern int      pwrFieldCount;
+extern PwrField pwrFields[32];
+extern bool     discoveryPwrNeeded;
 
-static void registerPwrAPI() {
-    server.on("/api/pwr/base", HTTP_GET, handleApiPwrBase);
-}
+// ------------------------------------------------------------
+// GET /api/pwr/base
+// ------------------------------------------------------------
+static esp_err_t api_pwr_base(httpd_req_t *req) {
 
-static void handleApiPwrBase() {
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "application/json", "");
+    PwrTable& tbl = pwrTable;
 
-    server.sendContent("{");
+    String out;
+    out.reserve(4096);
 
-    // ---------------------------------------------------------
-    // CONFIG BLOCK
-    // ---------------------------------------------------------
-    server.sendContent("\"config\":{");
+    out += "{";
 
-    server.sendContent("\"intervalPwr\":");
-    server.sendContent(String(config.battery.intervalPwr));
-    server.sendContent(",");
+    // CONFIG
+    out += "\"config\":{";
+    out += "\"intervalPwr\":";   out += config.battery.intervalPwr; out += ",";
+    out += "\"useFahrenheit\":"; out += (config.battery.useFahrenheit ? "true" : "false");
+    out += "},";
 
-    server.sendContent("\"useFahrenheit\":");
-    server.sendContent(config.battery.useFahrenheit ? "true" : "false");
+    // MQTT
+    out += "\"mqtt\":{";
+    out += "\"topicStack\":\""; out += config.mqtt.topicStack; out += "\",";
+    out += "\"topicPwr\":\"";   out += config.mqtt.topicPwr;   out += "\"";
+    out += "},";
 
-    server.sendContent("},");
-
-    // ---------------------------------------------------------
-    // MQTT BLOCK
-    // ---------------------------------------------------------
-    server.sendContent("\"mqtt\":{");
-
-    server.sendContent("\"topicStack\":\"");
-    server.sendContent(config.mqtt.topicStack);
-    server.sendContent("\",");
-
-    server.sendContent("\"topicPwr\":\"");
-    server.sendContent(config.mqtt.topicPwr);
-    server.sendContent("\"");
-
-    server.sendContent("},");
-
-    // ---------------------------------------------------------
     // HEADERS
-    // ---------------------------------------------------------
-    server.sendContent("\"headers\":[");
-    for (size_t i = 0; i < lastParserHeader.size(); i++) {
-        if (i > 0) server.sendContent(",");
-        server.sendContent("\"");
-        server.sendContent(lastParserHeader[i]);
-        server.sendContent("\"");
+    out += "\"headers\":[";
+    for (int c = 0; c < tbl.cols; c++) {
+        if (c > 0) out += ",";
+        out += "\"";
+        out += (tbl.header[c] ? tbl.header[c] : "");
+        out += "\"";
     }
-    server.sendContent("],");
+    out += "],";
 
-    // ---------------------------------------------------------
     // VALUES
-    // ---------------------------------------------------------
-    server.sendContent("\"values\":[");
-    for (size_t i = 0; i < lastParserValues.size(); i++) {
-        if (i > 0) server.sendContent(",");
-        server.sendContent("\"");
-        server.sendContent(lastParserValues[i]);
-        server.sendContent("\"");
+    out += "\"values\":[";
+    if (tbl.rows > 0) {
+        for (int c = 0; c < tbl.cols; c++) {
+            if (c > 0) out += ",";
+            out += "\"";
+            out += (tbl.cell[0][c] ? tbl.cell[0][c] : "");
+            out += "\"";
+        }
     }
-    server.sendContent("],");
+    out += "],";
 
-    // ---------------------------------------------------------
-    // FIELDS (NUR NVS-FELDER!)
-    // ---------------------------------------------------------
-    server.sendContent("\"fields\":[");
+    // FIELDS
+    out += "\"fields\":[";
+    bool first = true;
 
-    bool firstField = true;
+    for (int i = 0; i < pwrFieldCount; i++) {
+        const PwrField& f = pwrFields[i];
 
-    for (size_t i = 0; i < lastParserHeader.size(); i++) {
-
-        const String &name = lastParserHeader[i];
-
-        // Nur Felder aus dem NVS zurückgeben
-        if (!config.battery.fieldsPwr.count(name)) {
-            continue;   // <--- WICHTIG!
+        const char* raw = nullptr;
+        if (tbl.rows > 0) {
+            for (int c = 0; c < tbl.cols; c++) {
+                if (tbl.header[c] && strcmp(tbl.header[c], f.name.c_str()) == 0) {
+                    raw = tbl.cell[0][c];
+                    break;
+                }
+            }
         }
 
-        const FieldConfig &f = config.battery.fieldsPwr.at(name);
+        if (!first) out += ",";
+        first = false;
 
-        String raw = "";
-        if (i < lastParserValues.size()) raw = lastParserValues[i];
-
-        DynamicJsonDocument doc(256);
-        JsonObject o = doc.to<JsonObject>();
-
-        o["name"]        = name;
-        o["display"]     = f.display;
-        o["factor"]      = f.factor;
-        o["unit"]        = f.unit;
-        o["sendMQTT"]    = f.mqtt;
-        o["sendPayload"] = f.send;
-        o["raw"]         = raw;
-        o["value"]       = raw;
-
-        String tmp;
-        serializeJson(o, tmp);
-
-        if (!firstField) server.sendContent(",");
-        firstField = false;
-
-        server.sendContent(tmp);
+        out += "{";
+        out += "\"name\":\"";        out += f.name;    out += "\",";
+        out += "\"display\":\"";     out += f.display; out += "\",";
+        out += "\"factor\":\"";      out += f.factor;  out += "\",";
+        out += "\"unit\":\"";        out += f.unit;    out += "\",";
+        out += "\"sendMQTT\":";      out += (f.mqtt ? "true" : "false"); out += ",";
+        out += "\"sendPayload\":";   out += (f.send ? "true" : "false"); out += ",";
+        out += "\"raw\":\"";         out += (raw ? raw : ""); out += "\",";
+        out += "\"value\":\"";       out += (raw ? raw : ""); out += "\"";
+        out += "}";
     }
 
-    server.sendContent("]");
+    out += "]";
 
-    server.sendContent("}");
+    out += "}";
+
+    apiJson(req, out);
+    return ESP_OK;
 }
 
-static void handleApiPwrSet() {
+// ------------------------------------------------------------
+// POST /api/pwr/set
+// ------------------------------------------------------------
+static esp_err_t api_pwr_set(httpd_req_t *req) {
 
-    if (!server.hasArg("plain")) {
-        server.send(400, "text/plain", "Missing body");
-        return;
+    String body = apiGetBody(req);
+    if (body.isEmpty()) {
+        apiError(req, 400, "Missing body");
+        return ESP_OK;
     }
 
-    DynamicJsonDocument req(4096);
-    if (deserializeJson(req, server.arg("plain"))) {
-        server.send(400, "text/plain", "Invalid JSON");
-        return;
+    DynamicJsonDocument doc(4096);
+    if (deserializeJson(doc, body)) {
+        apiError(req, 400, "Invalid JSON");
+        return ESP_OK;
     }
 
     // CONFIG
-    config.battery.intervalPwr = req["config"]["intervalPwr"] | config.battery.intervalPwr;
-    config.battery.useFahrenheit = req["config"]["useFahrenheit"] | config.battery.useFahrenheit;
+    config.battery.intervalPwr   = doc["config"]["intervalPwr"]   | config.battery.intervalPwr;
+    config.battery.useFahrenheit = doc["config"]["useFahrenheit"] | config.battery.useFahrenheit;
 
     // MQTT
-    config.mqtt.topicStack = req["mqtt"]["topicStack"] | config.mqtt.topicStack;
-    config.mqtt.topicPwr   = req["mqtt"]["topicPwr"]   | config.mqtt.topicPwr;
+    config.mqtt.topicStack = doc["mqtt"]["topicStack"] | config.mqtt.topicStack;
+    config.mqtt.topicPwr   = doc["mqtt"]["topicPwr"]   | config.mqtt.topicPwr;
 
     // FIELDS
-    JsonArray arr = req["fields"];
+    JsonArray arr = doc["fields"];
+    pwrFieldCount = 0;
+
     for (JsonObject f : arr) {
+        if (pwrFieldCount >= 32) break;
 
-        String name = f["name"] | "";
-        if (name.length() == 0) continue;
+        PwrField pf;
+        pf.name    = f["name"]        | "";
+        pf.display = f["display"]     | pf.name;
+        pf.factor  = f["factor"]      | "1";
+        pf.unit    = f["unit"]        | "";
+        pf.mqtt    = f["sendMQTT"]    | false;
+        pf.send    = f["sendPayload"] | false;
 
-        if (!config.battery.fieldsPwr.count(name)) {
-            FieldConfig fc;
-            fc.label   = name;
-            fc.display = name;
-            fc.factor  = "1";
-            fc.unit    = "";
-            fc.mqtt    = false;
-            fc.send    = false;
-            config.battery.fieldsPwr[name] = fc;
-        }
-
-        FieldConfig &fc = config.battery.fieldsPwr[name];
-
-        fc.display = f["display"]     | fc.display;
-        fc.label   = f["display"]     | fc.label;
-        fc.factor  = f["factor"]      | fc.factor;
-        fc.unit    = f["unit"]        | fc.unit;
-        fc.mqtt    = f["sendMQTT"]    | false;
-        fc.send    = f["sendPayload"] | false;
+        pwrFields[pwrFieldCount++] = pf;
     }
 
+    config.savePwrFields();
     discoveryPwrNeeded = true;
     config.save();
 
-    server.send(200, "text/plain", "PWR settings saved");
+    apiText(req, "PWR settings saved");
+    return ESP_OK;
+}
+
+// ------------------------------------------------------------
+// Registrierung
+// ------------------------------------------------------------
+inline void registerPwrAPI() {
+
+    httpd_uri_t r1 = { "/api/pwr/base", HTTP_GET,  api_pwr_base, NULL };
+    httpd_uri_t r2 = { "/api/pwr/set",  HTTP_POST, api_pwr_set,  NULL };
+
+    httpd_register_uri_handler(server, &r1);
+    httpd_register_uri_handler(server, &r2);
 }

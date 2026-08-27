@@ -3,18 +3,24 @@ function sendCmd() {
     if (cmd.length === 0) return;
 
     fetch('/req?code=' + encodeURIComponent(cmd))
-        .then(() => loadFrame());
+        .then(r => r.text())
+        .then(ticket => {
+            loadFrame(ticket);
+        });
 
     document.getElementById('cmdline').value = '';
 }
 
 function quickCmd(c) {
     fetch('/req?code=' + encodeURIComponent(c))
-        .then(() => loadFrame());
+        .then(r => r.text())
+        .then(ticket => {
+            loadFrame(ticket);
+        });
 }
 
-function loadFrame() {
-    fetch('/api/lastframe')
+function loadFrame(ticket) {
+    fetch('/api/lastframe?ticket=' + ticket)
         .then(r => r.text())
         .then(t => {
             const box = document.getElementById('rawout');
@@ -22,10 +28,3 @@ function loadFrame() {
             box.scrollTop = box.scrollHeight;
         });
 }
-
-document.getElementById('cmdline').addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        sendCmd();
-    }
-});

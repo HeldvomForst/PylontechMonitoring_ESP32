@@ -4,7 +4,7 @@
 
 #include "py_uart.h"
 #include "config.h"
-#include "py_parser_pwr.h"   // für lastParsedStack + lastParsedModules
+#include "py_parser.h"   // für lastParsedStack + lastParsedModules
 
 class PyScheduler {
 public:
@@ -27,13 +27,14 @@ private:
     unsigned long lastBat  = 0;
     unsigned long lastStat = 0;
 
-    bool initialPwrDone  = false;
-    bool initialBatDone  = false;
-    bool initialStatDone = false;
-    bool initialDiscoveryDone = false;
-
+    bool initialPwrDone        = false;
+    bool initialBatDone        = false;
+    bool initialStatDone       = false;
+    bool initialDiscoveryDone  = false;
 
     std::vector<String> queue;
+
+    int nextCommandId = 1;   // eindeutige IDs für Befehle
 };
 
 extern PyScheduler py_scheduler;

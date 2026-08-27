@@ -1,149 +1,198 @@
 #pragma once
+#include "api_core.h"
 #include <ArduinoJson.h>
-#include "../wp_webserver.h"
-#include "../py_parser_stat.h"
+#include "../py_parser.h"
 #include "../config.h"
 
-static void handleApiStatValues();
+extern AppConfig config;
+extern StatTable statTable;
+extern bool      discoveryStatNeeded;
 
-static void registerStatAPI() {
-    server.on("/api/stat/values", HTTP_GET, handleApiStatValues);
-}
+extern FieldConfig statFields[STAT_MAX_FIELDS];
+extern int         statFieldCount;
 
-static void handleApiStatValues() {
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "application/json", "");
+// ------------------------------------------------------------
+// GET /api/stat/values
+// ------------------------------------------------------------
+static esp_err_t api_stat_values(httpd_req_t *req) {
 
-    server.sendContent("{");
+    StatTable& tbl = statTable;
+
+    httpd_resp_set_type(req, "application/json");
+
+    // JSON Start
+    httpd_resp_send_chunk(req, "{", 1);
 
     // CONFIG
-    server.sendContent("\"config\":{");
-    server.sendContent("\"intervalStat\":");
-    server.sendContent(String(config.battery.intervalStat));
-    server.sendContent(",");
-    server.sendContent("\"enableStat\":");
-    server.sendContent(config.battery.enableStat ? "true" : "false");
-    server.sendContent("},");
+    {
+        String chunk;
+        chunk.reserve(128);
+        chunk += "\"config\":{";
+        chunk += "\"enableStat\":";   chunk += (config.battery.enableStat ? "true" : "false"); chunk += ",";
+        chunk += "\"intervalStat\":"; chunk += config.battery.intervalStat;
+        chunk += "},";
+        httpd_resp_send_chunk(req, chunk.c_str(), chunk.length());
+    }
 
     // MQTT
-    server.sendContent("\"mqtt\":{");
-    server.sendContent("\"topicStat\":\"");
-    server.sendContent(config.mqtt.topicStat);
-    server.sendContent("\"");
-    server.sendContent("},");
+    {
+        String chunk;
+        chunk.reserve(128);
+        chunk += "\"mqtt\":{";
+        chunk += "\"topicStat\":\""; chunk += config.mqtt.topicStat; chunk += "\"";
+        chunk += "},";
+        httpd_resp_send_chunk(req, chunk.c_str(), chunk.length());
+    }
 
     // HEADERS
-    server.sendContent("\"headers\":[");
-    for (size_t i = 0; i < lastParsedStat.fields.size(); i++) {
-        if (i > 0) server.sendContent(",");
-        server.sendContent("\"");
-        server.sendContent(lastParsedStat.fields[i].name);
-        server.sendContent("\"");
+    httpd_resp_send_chunk(req, "\"headers\":[", 11);
+    for (int i = 0; i < tbl.count; i++) {
+        String chunk;
+        chunk.reserve(128);
+        if (i > 0) chunk += ",";
+        chunk += "\"";
+        chunk += (tbl.name[i] ? tbl.name[i] : "");
+        chunk += "\"";
+        httpd_resp_send_chunk(req, chunk.c_str(), chunk.length());
     }
-    server.sendContent("],");
+    httpd_resp_send_chunk(req, "],", 2);
 
     // VALUES
-    server.sendContent("\"values\":[");
-    for (size_t i = 0; i < lastParsedStat.fields.size(); i++) {
-        if (i > 0) server.sendContent(",");
-        server.sendContent("\"");
-        server.sendContent(lastParsedStat.fields[i].raw);
-        server.sendContent("\"");
+    httpd_resp_send_chunk(req, "\"values\":[", 10);
+    for (int i = 0; i < tbl.count; i++) {
+        String chunk;
+        chunk.reserve(128);
+        if (i > 0) chunk += ",";
+        chunk += "\"";
+        chunk += (tbl.value[i] ? tbl.value[i] : "");
+        chunk += "\"";
+        httpd_resp_send_chunk(req, chunk.c_str(), chunk.length());
     }
-    server.sendContent("],");
-
-    // FIELDS (nur NVS-Felder!)
-    server.sendContent("\"fields\":[");
-
-    bool first = true;
-    for (auto &pf : lastParsedStat.fields) {
-
-        // Nur Felder aus NVS zurückgeben
-        if (!config.battery.fieldsStat.count(pf.name)) {
-            continue;
-        }
-
-        const FieldConfig &f = config.battery.fieldsStat.at(pf.name);
-
-        DynamicJsonDocument doc(256);
-        JsonObject o = doc.to<JsonObject>();
-
-        o["name"]        = pf.name;
-        o["display"]     = f.display;
-        o["factor"]      = f.factor;
-        o["unit"]        = f.unit;
-        o["sendMQTT"]    = f.mqtt;
-        o["sendPayload"] = f.send;
-        o["raw"]         = pf.raw;
-        o["value"]       = pf.raw;
-
-        String tmp;
-        serializeJson(o, tmp);
-
-        if (!first) server.sendContent(",");
-        first = false;
-
-        server.sendContent(tmp);
-    }
-
-    server.sendContent("]");
-
-    server.sendContent("}");
-}
-
-static void handleApiStatSet() {
-
-    if (!server.hasArg("plain")) {
-        server.send(400, "text/plain", "Missing body");
-        return;
-    }
-
-    DynamicJsonDocument req(4096);
-    if (deserializeJson(req, server.arg("plain"))) {
-        server.send(400, "text/plain", "Invalid JSON");
-        return;
-    }
-
-    // CONFIG
-    config.battery.intervalStat = req["config"]["intervalStat"] | config.battery.intervalStat;
-    config.battery.enableStat   = req["config"]["enableStat"]   | config.battery.enableStat;
-
-    // MQTT
-    config.mqtt.topicStat = req["mqtt"]["topicStat"] | config.mqtt.topicStat;
+    httpd_resp_send_chunk(req, "],", 2);
 
     // FIELDS
-    JsonArray arr = req["fields"];
-    for (JsonObject f : arr) {
+    httpd_resp_send_chunk(req, "\"fields\":[", 10);
 
-        String name = f["name"] | "";
-        if (name.length() == 0) continue;
+    bool first = true;
 
-        if (!config.battery.fieldsStat.count(name)) {
-            FieldConfig fc;
-            fc.label   = name;
-            fc.display = name;
-            fc.factor  = "1";
-            fc.unit    = "";
-            fc.mqtt    = false;
-            fc.send    = false;
-            config.battery.fieldsStat[name] = fc;
+    for (int i = 0; i < tbl.count; i++) {
+
+        const char* key = tbl.name[i];
+        const char* raw = tbl.value[i];
+        if (!key) continue;
+
+        int idx = -1;
+        for (int j = 0; j < statFieldCount; j++) {
+            if (statFields[j].label == key) {
+                idx = j;
+                break;
+            }
         }
+        if (idx < 0) continue;
 
-        FieldConfig &fc = config.battery.fieldsStat[name];
+        const FieldConfig& fc = statFields[idx];
 
-        fc.display = f["display"]     | fc.display;
-        fc.label   = f["display"]     | fc.label;
-        fc.factor  = f["factor"]      | fc.factor;
-        fc.unit    = f["unit"]        | fc.unit;
-        fc.mqtt    = f["sendMQTT"]    | false;
-        fc.send    = f["sendPayload"] | false;
+        String chunk;
+        chunk.reserve(256);
+
+        if (!first) chunk += ",";
+        first = false;
+
+        chunk += "{";
+        chunk += "\"name\":\"";        chunk += key;        chunk += "\",";
+        chunk += "\"display\":\"";     chunk += fc.display; chunk += "\",";
+        chunk += "\"factor\":\"";      chunk += fc.factor;  chunk += "\",";
+        chunk += "\"unit\":\"";        chunk += fc.unit;    chunk += "\",";
+        chunk += "\"sendMQTT\":";      chunk += (fc.mqtt ? "true" : "false"); chunk += ",";
+        chunk += "\"sendPayload\":";   chunk += (fc.send ? "true" : "false"); chunk += ",";
+        chunk += "\"raw\":\"";         chunk += (raw ? raw : ""); chunk += "\",";
+        chunk += "\"value\":\"";       chunk += (raw ? raw : ""); chunk += "\"";
+        chunk += "}";
+
+        httpd_resp_send_chunk(req, chunk.c_str(), chunk.length());
     }
 
+    // JSON Ende
+    httpd_resp_send_chunk(req, "]}", 2);
 
-	discoveryStatNeeded = true;
+    // Abschluss
+    httpd_resp_send_chunk(req, NULL, 0);
 
-    config.save();
-
-    server.send(200, "text/plain", "STAT settings saved");
+    return ESP_OK;
 }
 
+// ------------------------------------------------------------
+// POST /api/stat/set
+// ------------------------------------------------------------
+static esp_err_t api_stat_set(httpd_req_t *req) {
+
+    String body = apiGetBody(req);
+    if (body.isEmpty()) {
+        apiError(req, 400, "Missing body");
+        return ESP_OK;
+    }
+
+    Log(LOG_INFO, String("STAT-SET: RAW JSON length = ") + body.length());
+
+    // Pointertabelle leeren
+    statFieldCount = 0;
+
+    // Felder im JSON suchen
+    int pos = body.indexOf("\"fields\"");
+    pos = body.indexOf("[", pos);
+    if (pos < 0) {
+        apiError(req, 400, "fields[] missing");
+        return ESP_OK;
+    }
+
+    while (true) {
+
+        int objStart = body.indexOf("{", pos);
+        if (objStart < 0) break;
+
+        int objEnd = body.indexOf("}", objStart);
+        if (objEnd < 0) break;
+
+        String fieldJson = body.substring(objStart, objEnd + 1);
+
+        StaticJsonDocument<512> doc;
+        if (!deserializeJson(doc, fieldJson)) {
+
+            bool mqttActive = doc["sendMQTT"] | false;
+
+            // *** NEU: nur MQTT-aktive Felder speichern ***
+            if (mqttActive) {
+                FieldConfig& fc = statFields[statFieldCount++];
+
+                fc.label   = doc["name"]        | "";
+                fc.display = doc["display"]     | fc.label;
+                fc.factor  = doc["factor"]      | "1";
+                fc.unit    = doc["unit"]        | "";
+                fc.mqtt    = true;              // nur aktive
+                fc.send    = doc["sendPayload"] | false;
+            }
+        }
+
+        pos = objEnd + 1;
+    }
+
+    Log(LOG_INFO, String("STAT-SET: MQTT-active fields = ") + statFieldCount);
+
+    // Jetzt Pointertabelle als JSON-Chunks speichern
+    config.saveStatFields();
+
+    apiText(req, "STAT saved");
+    return ESP_OK;
+}
+
+// ------------------------------------------------------------
+// Registrierung
+// ------------------------------------------------------------
+inline void registerStatAPI() {
+
+    httpd_uri_t r1 = { "/api/stat/values", HTTP_GET,  api_stat_values, NULL };
+    httpd_uri_t r2 = { "/api/stat/set",    HTTP_POST, api_stat_set,    NULL };
+
+    httpd_register_uri_handler(server, &r1);
+    httpd_register_uri_handler(server, &r2);
+}

@@ -13,8 +13,6 @@ namespace SystemManager {
 
     // interne Funktionen
     void handleButton();
-    void printCpuStats();
-
 
     // Events auslösen
     void triggerAPTemporary();

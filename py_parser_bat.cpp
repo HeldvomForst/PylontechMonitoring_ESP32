@@ -1,219 +1,253 @@
-#include "py_parser_bat.h"
+#include <Arduino.h>
+#include "config.h"
+#include "py_parser.h"
 #include "py_log.h"
 #include "py_uart.h"
 
 extern PyUart py_uart;
 
-// Globale BAT-Daten (für Web-UI)
-std::vector<BatData> lastParsedBatCells;
-BatData lastParsedBat;
+// Workbuffer für alle Strings
+static char batWork[BAT_WORKBUF_SIZE];
+static int batWp = 0;
+
+// Globale BAT‑Tabelle
+BatTable batTable;
+
+// MQTT‑Trigger
+extern bool batParserHasData;
+extern int  batParserModuleIndex;
 
 // ---------------------------------------------------------
-// Helper: trim whitespace
+// Hilfsfunktion: prüfen, ob Zeile Header ist
 // ---------------------------------------------------------
-static String trimWS(const String& s) {
-    String r = s;
-    r.trim();
-    return r;
-}
+static bool isHeaderLine(const char* buf, int s, int e) {
 
-// ---------------------------------------------------------
-// Extract @ ... $$ frame
-// ---------------------------------------------------------
-static bool extractFrame(const String& raw, String& frame) {
-    int start = raw.indexOf('@');
-    int end   = raw.indexOf("$$");
-
-    if (start < 0 || end < 0 || end <= start)
+    // 1) Erste Spalte darf NICHT mit einer Zahl beginnen
+    if (isdigit((unsigned char)buf[s]))
         return false;
 
-    frame = raw.substring(start + 1, end);
-    return true;
-}
+    int colCount = 0;
+    int textCols = 0;
 
-// ---------------------------------------------------------
-// Split columns by 2+ spaces
-// ---------------------------------------------------------
-static std::vector<String> splitColumns(const String& line) {
-    std::vector<String> out;
-    int len = line.length();
-    int start = 0;
+    int cs = s;
+    while (cs < e) {
+        while (cs < e && buf[cs] == ' ') cs++;
+        if (cs >= e) break;
 
-    while (start < len) {
-        while (start < len && line[start] == ' ') start++;
-        if (start >= len) break;
-
-        int end = start;
+        int ce = cs;
         int spaceCount = 0;
-
-        while (end < len) {
-            char c = line[end];
+        while (ce < e) {
+            char c = buf[ce];
             if (c == ' ') {
                 spaceCount++;
                 if (spaceCount >= 2) break;
             } else {
                 spaceCount = 0;
             }
-            end++;
+            ce++;
         }
 
-        String col = line.substring(start, end);
-        col.trim();
-        if (col.length() > 0) out.push_back(col);
+        int ts = cs;
+        int te = ce;
+        while (ts < te && buf[ts] == ' ') ts++;
+        while (te > ts && buf[te - 1] == ' ') te--;
 
-        start = end;
+        int len = te - ts;
+        if (len > 0) {
+            colCount++;
+
+            int digits = 0;
+            for (int i = ts; i < te; i++) {
+                if (isdigit((unsigned char)buf[i]))
+                    digits++;
+            }
+
+            // weniger als 20% Ziffern → Textspalte
+            if (digits < len * 0.2f)
+                textCols++;
+        }
+
+        cs = ce;
     }
 
-    return out;
+    if (colCount < 5)
+        return false;
+
+    // mindestens 80% Textspalten
+    if (textCols < (int)(colCount * 0.8f))
+        return false;
+
+    return true;
 }
 
 // ---------------------------------------------------------
-// Main BAT parser
+// RAM‑optimierter BAT‑Parser
 // ---------------------------------------------------------
-ParseResult parseBatFrame(int /*moduleIndex*/,
-                          const String& raw,
-                          BatData& out)
+ParseResult parseBatFrame(int moduleIndex, const String& raw)
 {
-    lastParsedBatCells.clear();
-    out.fields.clear();
-    out.cellIndex = -1;
+    batTable.rows = 0;
+    batTable.cols = 0;
+    batWp = 0;
 
-    // ---------------------------------------------------------
-    // 1) Check if this frame belongs to BAT
-    // ---------------------------------------------------------
-    String last = py_uart.getLastCommand();
-    String lastLower = last;
-    lastLower.trim();
-    lastLower.toLowerCase();
-
-    if (!lastLower.startsWith("bat")) {
-        Log(LOG_DEBUG, "BAT parser: ignoring frame (last command was '" + last + "')");
-        return PARSE_IGNORED;
-    }
-
-    // Extract module index from command (bat1, bat2, ...)
-    String num = lastLower.substring(3);
-    num.trim();
-    int moduleIdx = num.toInt();
-
-    if (moduleIdx < 1 || moduleIdx > 16) {
-        Log(LOG_WARN, "BAT parser: invalid module index '" + last + "'");
-        return PARSE_IGNORED;
-    }
-
-    out.moduleIndex = moduleIdx;
-
-    // ---------------------------------------------------------
-    // 2) Validate frame
-    // ---------------------------------------------------------
-    if (!py_uart.isFrameValid()) {
-        Log(LOG_WARN, "BAT parser: skipping invalid frame");
+    int start = raw.indexOf('@');
+    int end   = raw.indexOf("$$");
+    if (start < 0 || end < 0 || end <= start)
         return PARSE_FAIL;
+
+    const char* buf = raw.c_str();
+    int pos = start + 1;
+    int len = end;
+
+    const int MAX_LINES = 40;
+    int lineStart[MAX_LINES];
+    int lineEnd[MAX_LINES];
+    int lineCount = 0;
+
+    int curStart = pos;
+    while (curStart < len && lineCount < MAX_LINES) {
+        int curEnd = curStart;
+        while (curEnd < len && buf[curEnd] != '\r' && buf[curEnd] != '\n')
+            curEnd++;
+
+        int s = curStart;
+        int e = curEnd;
+        while (s < e && buf[s] == ' ') s++;
+        while (e > s && buf[e - 1] == ' ') e--;
+
+        if (e > s) {
+            lineStart[lineCount] = s;
+            lineEnd[lineCount]   = e;
+            lineCount++;
+        }
+
+        curStart = curEnd + 1;
     }
 
-    Log(LOG_INFO, "BAT parser: raw frame received for module " + String(moduleIdx));
-
-    // ---------------------------------------------------------
-    // 3) Extract @ ... $$ section
-    // ---------------------------------------------------------
-    String frame;
-    if (!extractFrame(raw, frame)) {
-        Log(LOG_WARN, "BAT parser: no valid @ ... $$ frame found");
+    if (lineCount < 3)
         return PARSE_FAIL;
-    }
 
-    frame.replace("\r\n", "\n");
-    frame.replace("\r", "\n");
-
-    // ---------------------------------------------------------
-    // 4) Split into lines
-    // ---------------------------------------------------------
-    std::vector<String> lines;
-    {
-        int pos = 0;
-        while (true) {
-            int nl = frame.indexOf('\n', pos);
-            if (nl < 0) {
-                String lastLine = trimWS(frame.substring(pos));
-                if (lastLine.length() > 0) lines.push_back(lastLine);
-                break;
-            }
-            String line = trimWS(frame.substring(pos, nl));
-            if (line.length() > 0) lines.push_back(line);
-            pos = nl + 1;
+    // Header suchen
+    int headerIndex = -1;
+    for (int i = 0; i < lineCount; i++) {
+        if (isHeaderLine(buf, lineStart[i], lineEnd[i])) {
+            headerIndex = i;
+            break;
         }
     }
-
-    if (lines.size() < 2) {
-        Log(LOG_WARN, "BAT parser: too few lines");
+    if (headerIndex < 0)
         return PARSE_FAIL;
+
+    // Header kopieren → batTable.header[], batTable.cols
+    {
+        int s = lineStart[headerIndex];
+        int e = lineEnd[headerIndex];
+
+        int cs = s;
+        int col = 0;
+
+        while (cs < e && col < BAT_MAX_COLS) {
+            while (cs < e && buf[cs] == ' ') cs++;
+            if (cs >= e) break;
+
+            int ce = cs;
+            int spaceCount = 0;
+            while (ce < e) {
+                char c = buf[ce];
+                if (c == ' ') {
+                    spaceCount++;
+                    if (spaceCount >= 2) break;
+                } else {
+                    spaceCount = 0;
+                }
+                ce++;
+            }
+
+            int ts = cs;
+            int te = ce;
+            while (ts < te && buf[ts] == ' ') ts++;
+            while (te > ts && buf[te - 1] == ' ') te--;
+
+            int lenCol = te - ts;
+            if (lenCol > 0) {
+                if (batWp + lenCol + 1 >= BAT_WORKBUF_SIZE)
+                    return PARSE_FAIL;
+
+                memcpy(&batWork[batWp], buf + ts, lenCol);
+                batWork[batWp + lenCol] = '\0';
+                batTable.header[col] = &batWork[batWp];
+                batWp += lenCol + 1;
+                col++;
+            }
+
+            cs = ce;
+        }
+
+        batTable.cols = col;
     }
 
-    // ---------------------------------------------------------
-    // 5) Header
-    // ---------------------------------------------------------
-    std::vector<String> header = splitColumns(lines[0]);
-    if (header.empty()) {
-        Log(LOG_WARN, "BAT parser: empty header");
-        return PARSE_FAIL;
-    }
+    // Datenzeilen: ALLE Zellen (0..14) in batTable.cell[row][col]
+    batTable.rows = 0;
 
-    // ---------------------------------------------------------
-    // 6) Parse cell rows
-    // ---------------------------------------------------------
-    for (int row = 1; row < (int)lines.size(); row++) {
-        String line = lines[row];
+    for (int i = headerIndex + 1; i < lineCount; i++) {
 
-        // Stop at non-numeric first token
-        String firstToken = line;
-        firstToken.trim();
-        int spacePos = firstToken.indexOf(' ');
-        if (spacePos > 0)
-            firstToken = firstToken.substring(0, spacePos);
+        int s = lineStart[i];
+        int e = lineEnd[i];
 
-        if (firstToken.length() == 0)
+        // Datenzeile beginnt mit Ziffer (Cell‑Index)
+        if (!isdigit((unsigned char)buf[s]))
             continue;
 
-        if (!isDigit(firstToken[0])) {
-            break; // end of data
+        if (batTable.rows >= BAT_MAX_ROWS)
+            break;
+
+        int row = batTable.rows;
+        int cs  = s;
+        int col = 0;
+
+        while (cs < e && col < batTable.cols) {
+            while (cs < e && buf[cs] == ' ') cs++;
+            if (cs >= e) break;
+
+            int ce = cs;
+            int spaceCount = 0;
+            while (ce < e) {
+                char c = buf[ce];
+                if (c == ' ') {
+                    spaceCount++;
+                    if (spaceCount >= 2) break;
+                } else {
+                    spaceCount = 0;
+                }
+                ce++;
+            }
+
+            int ts = cs;
+            int te = ce;
+            while (ts < te && buf[ts] == ' ') ts++;
+            while (te > ts && buf[te - 1] == ' ') te--;
+
+            int lenCol = te - ts;
+            if (lenCol > 0) {
+                if (batWp + lenCol + 1 >= BAT_WORKBUF_SIZE)
+                    return PARSE_FAIL;
+
+                memcpy(&batWork[batWp], buf + ts, lenCol);
+                batWork[batWp + lenCol] = '\0';
+                batTable.cell[row][col] = &batWork[batWp];
+                batWp += lenCol + 1;
+                col++;
+            }
+
+            cs = ce;
         }
 
-        std::vector<String> cols = splitColumns(line);
-        if (cols.empty()) continue;
-
-        size_t count = min(header.size(), cols.size());
-
-        BatData cell;
-        cell.cellIndex = row - 1;
-        cell.moduleIndex = moduleIdx;
-
-        for (size_t c = 0; c < count; c++) {
-            BatField f;
-            f.name = header[c];
-            f.raw  = cols[c];
-            cell.fields.push_back(f);
-        }
-
-        lastParsedBatCells.push_back(cell);
+        batTable.rows++;
     }
 
-    // ---------------------------------------------------------
-    // 7) Store first cell for convenience
-    // ---------------------------------------------------------
-    if (!lastParsedBatCells.empty()) {
-        out = lastParsedBatCells[0];
-        lastParsedBat = out;
-    }
-
-    BatBuffer* target = batUseA ? &batB : &batA;
-
-    target->cells = lastParsedBatCells;
-
-    batUseA = !batUseA;
-
-
-    Log(LOG_INFO, "BAT parser: parsed " + String(lastParsedBatCells.size()) +
-                  " cells for module " + String(moduleIdx));
+    batParserHasData     = true;
+    batParserModuleIndex = moduleIndex;
 
     return PARSE_OK;
 }
+
+

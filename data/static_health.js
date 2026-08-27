@@ -1,4 +1,16 @@
 // ---------------------------------------------------------
+// Übersetzungs‑Map für API‑Texte
+// ---------------------------------------------------------
+const healthStatusMap = {
+    "OK": "health_status_ok",
+    "Warnung": "health_status_warn",
+    "Fehler": "health_status_error",
+    "Alles OK": "health_status_all_ok",
+    "Warnung in Modulen": "health_status_warn_modules",
+    "Fehler in Modulen": "health_status_error_modules"
+};
+
+// ---------------------------------------------------------
 // Auto‑Reload Steuerung
 // ---------------------------------------------------------
 let healthAutoReload = true;
@@ -12,23 +24,36 @@ function loadHealth() {
         .then(r => r.json())
         .then(data => {
 
-            // Header
+            // ---------------------------------------------------------
+            // Header (übersetzbar)
+            // ---------------------------------------------------------
             let h = document.getElementById("health_header");
-            h.innerText = "Health: " + data.strongest;
+
+            let key = healthStatusMap[data.strongest] || data.strongest;
+            let translated = T[key] || data.strongest;
+
+            h.innerText = T["health_title"] + ": " + translated;
+
             h.style.background =
                 data.color === "green" ? "#00cc00" :
                 data.color === "yellow" ? "#ffcc00" :
                 "#ff4444";
 
-            // Module
+            // ---------------------------------------------------------
+            // Module (Status übersetzbar)
+            // ---------------------------------------------------------
             let tbody = document.querySelector("#health_table tbody");
             tbody.innerHTML = "";
 
             data.modules.forEach(m => {
+
+                let statusKey = healthStatusMap[m.status] || m.status;
+                let statusTranslated = T[statusKey] || m.status;
+
                 let row = document.createElement("tr");
                 row.innerHTML = `
                     <td>${m.index}</td>
-                    <td>${m.status}</td>
+                    <td>${statusTranslated}</td>
                     <td>${m.tempMax.toFixed(2)}°C</td>
                     <td>${m.cellMin.toFixed(3)}V</td>
                     <td>${m.cellMax.toFixed(3)}V</td>
@@ -37,22 +62,30 @@ function loadHealth() {
                 tbody.appendChild(row);
             });
 
+            // ---------------------------------------------------------
             // Stack
+            // ---------------------------------------------------------
             document.getElementById("stack_info").innerText =
-                `Min: ${data.stack.cellMin.toFixed(3)}V, ` +
-                `Max: ${data.stack.cellMax.toFixed(3)}V, ` +
-                `Delta: ${data.stack.cellDiff.toFixed(3)}V`;
+                `${T["health_stack_min"] || "Min"}: ${data.stack.cellMin.toFixed(3)}V, ` +
+                `${T["health_stack_max"] || "Max"}: ${data.stack.cellMax.toFixed(3)}V, ` +
+                `${T["health_stack_delta"] || "Delta"}: ${data.stack.cellDiff.toFixed(3)}V`;
 
+            // ---------------------------------------------------------
             // Listen
+            // ---------------------------------------------------------
             document.getElementById("ok_list").innerText   = data.ok.join(", ");
             document.getElementById("warn_list").innerText = data.warn.join(", ");
             document.getElementById("err_list").innerText  = data.error.join(", ");
 
+            // ---------------------------------------------------------
             // Historie
+            // ---------------------------------------------------------
             document.getElementById("warn_hist").innerText = data.warnHistory.join(", ");
             document.getElementById("err_hist").innerText  = data.errorHistory.join(", ");
 
+            // ---------------------------------------------------------
             // Schwellwerte anzeigen
+            // ---------------------------------------------------------
             if (data.config) {
                 document.getElementById("cellDiffWarn").value  =
                     data.config.cellDiffWarn.toFixed(3);
